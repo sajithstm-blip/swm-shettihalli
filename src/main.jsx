@@ -46,16 +46,15 @@ import {
 // Detect if we are in the Canvas environment or deployed on Vercel
 const isCanvas = typeof __firebase_config !== 'undefined';
 
-const firebaseConfig = isCanvas 
-  ? JSON.parse(__firebase_config) 
-  : {
-      apiKey: "YOUR_API_KEY",
-      authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
-      projectId: "YOUR_PROJECT_ID",
-      storageBucket: "YOUR_PROJECT_ID.appspot.com",
-      messagingSenderId: "YOUR_SENDER_ID",
-      appId: "YOUR_APP_ID"
-    };
+const firebaseConfig = {
+  apiKey: "AIzaSyDns4NX18h_dCrZ3hyyFzHT-bUvdwdRLw0",
+  authDomain: "admob-app-id-4497163742.firebaseapp.com",
+  databaseURL: "https://admob-app-id-4497163742.firebaseio.com",
+  projectId: "admob-app-id-4497163742",
+  storageBucket: "admob-app-id-4497163742.firebasestorage.app",
+  messagingSenderId: "944948366460",
+  appId: "1:944948366460:web:da3388aeb8af102302cdf9"
+};
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
