@@ -131,6 +131,7 @@ const App = () => {
   useEffect(() => {
     if (!user) return;
 
+    // Fetch Project Configuration (Geography & Team)
     const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'app_config', 'settings');
     const unsubConfig = onSnapshot(configRef, (docSnap) => {
       if (docSnap.exists()) {
@@ -148,6 +149,7 @@ const App = () => {
       setLoading(false);
     });
 
+    // Fetch Daily Logs
     const dataRef = collection(db, 'artifacts', appId, 'public', 'data', 'daily_logs');
     const unsubData = onSnapshot(query(dataRef), (snapshot) => {
       const logs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
@@ -162,11 +164,13 @@ const App = () => {
     };
   }, [user]);
 
+  // UI Feedback
   const showStatus = (type, text) => {
     setStatusMsg({ type, text: String(text) });
     setTimeout(() => setStatusMsg({ type: '', text: '' }), 5000);
   };
 
+  // Logic to save Hierarchy/Team settings
   const saveConfig = async (newConfig) => {
     if (!user) return;
     try {
@@ -178,6 +182,7 @@ const App = () => {
     }
   };
 
+  // Logic to submit a single daily report
   const submitDailyLog = async () => {
     if (!user) return;
     if (!entryBlock) {
@@ -536,6 +541,8 @@ const App = () => {
               <h1 className="text-3xl font-black text-slate-800">Project Configuration</h1>
               <p className="text-slate-500 font-medium">Define geography and team assignments</p>
             </header>
+
+            {/* Team Supervisors */}
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
               <div className="flex items-center justify-between mb-8">
                 <h3 className="text-xl font-black flex items-center gap-3"><UserCheck className="text-blue-500"/> Team Supervisors</h3>
@@ -554,6 +561,91 @@ const App = () => {
                 ))}
               </div>
             </section>
+
+            {/* Geo Hierarchy (States & Wards) */}
+            <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
+              <div className="flex items-center justify-between mb-8">
+                <h3 className="text-xl font-black flex items-center gap-3"><Globe className="text-blue-500" /> Geo Hierarchy</h3>
+                <button onClick={() => setConfig({...config, states: [...config.states, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add State</button>
+              </div>
+              <div className="space-y-6">
+                {config.states.map((st, sIdx) => (
+                  <div key={st.id} className="border border-slate-100 rounded-[24px] overflow-hidden">
+                    <div className="bg-slate-50 p-4 flex items-center gap-4">
+                      <input className="flex-1 bg-transparent font-black text-blue-600 outline-none text-lg" placeholder="State Name" value={st.name} onChange={(e) => {
+                        const newStates = [...config.states];
+                        newStates[sIdx].name = e.target.value;
+                        setConfig({...config, states: newStates});
+                      }} />
+                      <button onClick={() => setConfig({...config, wards: [...config.wards, { id: Date.now().toString(), stateId: st.id, name: '' }]})} className="text-[10px] bg-white border border-slate-200 px-3 py-1.5 rounded-lg font-bold">+ Ward</button>
+                      <button onClick={() => setConfig({...config, states: config.states.filter(s => s.id !== st.id)})} className="text-red-400"><Trash2 size={16}/></button>
+                    </div>
+                    <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-2">
+                      {config.wards.filter(w => w.stateId === st.id).map((wd) => (
+                        <div key={wd.id} className="flex items-center gap-2 bg-white border border-slate-100 p-2 rounded-xl">
+                          <input className="flex-1 text-sm font-bold outline-none" placeholder="Ward Name" value={wd.name} onChange={(e) => {
+                            const newWards = [...config.wards];
+                            const idx = config.wards.findIndex(w => w.id === wd.id);
+                            newWards[idx].name = e.target.value;
+                            setConfig({...config, wards: newWards});
+                          }} />
+                          <button onClick={() => setConfig({...config, wards: config.wards.filter(w => w.id !== wd.id)})} className="text-red-400">&times;</button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            {/* Block Units (Operational Blocks) */}
+            <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
+              <div className="flex items-center justify-between mb-8">
+                <h3 className="text-xl font-black flex items-center gap-3"><Database className="text-blue-500" /> Block Units</h3>
+                <button onClick={() => setConfig({...config, blocks: [...config.blocks, { id: Date.now().toString(), name: '', wardId: '', supervisorId: '', totalHH: 0 }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Block</button>
+              </div>
+              <div className="space-y-4">
+                {config.blocks.map((bl, bIdx) => (
+                  <div key={bl.id} className="flex flex-col md:flex-row gap-4 bg-slate-50 p-5 rounded-[24px] border border-slate-100 relative group">
+                    <div className="flex-1 space-y-2">
+                      <input className="w-full bg-transparent font-black text-slate-800 outline-none text-lg border-b-2 border-slate-200 focus:border-blue-500" placeholder="Block Name" value={bl.name} onChange={(e) => {
+                        const newBlocks = [...config.blocks];
+                        newBlocks[bIdx].name = e.target.value;
+                        setConfig({...config, blocks: newBlocks});
+                      }} />
+                      <div className="grid grid-cols-2 gap-2">
+                        <select className="bg-white border border-slate-200 rounded-lg p-2 text-[10px] font-bold outline-none" value={bl.wardId} onChange={(e) => {
+                          const newBlocks = [...config.blocks];
+                          newBlocks[bIdx].wardId = e.target.value;
+                          setConfig({...config, blocks: newBlocks});
+                        }}>
+                          <option value="">Select Ward</option>
+                          {config.wards.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+                        </select>
+                        <select className="bg-white border border-slate-200 rounded-lg p-2 text-[10px] font-bold outline-none" value={bl.supervisorId} onChange={(e) => {
+                          const newBlocks = [...config.blocks];
+                          newBlocks[bIdx].supervisorId = e.target.value;
+                          setConfig({...config, blocks: newBlocks});
+                        }}>
+                          <option value="">Select Lead</option>
+                          {config.supervisors.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                    <div className="w-24 text-center">
+                      <label className="text-[10px] font-black text-slate-400 uppercase">Total HH</label>
+                      <input type="number" className="w-full bg-white border border-slate-200 rounded-lg p-2 text-center font-black" value={bl.totalHH} onChange={(e) => {
+                        const newBlocks = [...config.blocks];
+                        newBlocks[bIdx].totalHH = Number(e.target.value);
+                        setConfig({...config, blocks: newBlocks});
+                      }} />
+                    </div>
+                    <button onClick={() => setConfig({...config, blocks: config.blocks.filter(b => b.id !== bl.id)})} className="text-red-400">&times;</button>
+                  </div>
+                ))}
+              </div>
+            </section>
+
             <button onClick={() => saveConfig(config)} className="w-full py-6 bg-gradient-to-r from-green-600 to-green-700 text-white rounded-[32px] font-black text-xl shadow-2xl transition hover:scale-[1.01]">Publish Global Configuration</button>
           </div>
         )}
@@ -561,7 +653,7 @@ const App = () => {
     </div>
   );
 };
-const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(<App />);
 
 export default App;
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
