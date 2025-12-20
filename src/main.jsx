@@ -16,7 +16,7 @@ import {
   query 
 } from 'firebase/firestore';
 import { 
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LineChart, Line 
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area
 } from 'recharts';
 import { 
   LayoutDashboard, 
@@ -40,7 +40,10 @@ import {
   Upload,
   FileText,
   Search,
-  ArrowRight
+  ArrowRight,
+  BarChart3,
+  Ban,
+  ClipboardCheck
 } from 'lucide-react';
 
 /**
@@ -107,7 +110,7 @@ const App = () => {
     hhGiving: 0,
     hhSegregating: 0,
     noCollection: false,
-    reason: 'Vehicle didn\'t come'
+    reason: "Vehicle didn't come"
   });
 
   // Auth Initialization
@@ -145,7 +148,7 @@ const App = () => {
       }
       setLoading(false);
     }, (err) => {
-      console.error("Config Sync Error:", err);
+      console.error("Config Error:", err);
       setLoading(false);
     });
 
@@ -154,7 +157,7 @@ const App = () => {
       const logs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setDailyData(logs);
     }, (err) => {
-      console.error("Data Sync Error:", err);
+      console.error("Data Error:", err);
     });
 
     return () => {
@@ -189,7 +192,7 @@ const App = () => {
   const submitDailyLog = async () => {
     if (!user) return;
     if (!entryBlock) {
-      showStatus('error', "Please select State, Ward, and Block.");
+      showStatus('error', "Please select a State, Ward, and Block.");
       return;
     }
 
@@ -222,14 +225,14 @@ const App = () => {
         hhGiving: 0, 
         hhSegregating: 0, 
         noCollection: false, 
-        reason: 'Vehicle didn\'t come' 
+        reason: "Vehicle didn't come" 
       });
     } catch (e) {
-      showStatus('error', "Submission failed. Please check rules.");
+      showStatus('error', "Submission failed. Please check your rules.");
     }
   };
 
-  // Analytics Logic
+  // --- Dashboard Analytics Logic ---
   const filteredLogs = useMemo(() => {
     return dailyData.filter(log => {
       const stateMatch = dashState === 'all' || log.stateId === dashState;
@@ -252,18 +255,33 @@ const App = () => {
         key = new Date(log.date).toLocaleString('en-IN', {month:'short', year:'numeric'});
       }
 
-      if (!groups[key]) groups[key] = { name: key, giving: 0, seg: 0, count: 0 };
+      if (!groups[key]) {
+        groups[key] = { 
+          name: key, 
+          covered: 0, 
+          giving: 0, 
+          seg: 0, 
+          absences: 0, 
+          rawDate: log.date 
+        };
+      }
+      
+      groups[key].covered += Number(log.hhCovered || 0);
       if (!log.noCollection) {
         groups[key].giving += Number(log.hhGiving || 0);
         groups[key].seg += Number(log.hhSegregating || 0);
+      } else {
+        groups[key].absences += 1;
       }
-      groups[key].count += 1;
     });
 
-    return Object.values(groups).sort((a, b) => a.name.localeCompare(b.name)).map(g => ({
+    // Sort chronologically to prevent graph tooltip overlaps/flickering
+    return Object.values(groups).sort((a, b) => a.rawDate.localeCompare(b.rawDate)).map(g => ({
       ...g,
-      avgGiving: (g.giving / (viewTimeframe === 'daily' ? 1 : g.count)).toFixed(0),
-      avgSeg: (g.seg / (viewTimeframe === 'daily' ? 1 : g.count)).toFixed(0)
+      avgGiving: g.giving,
+      avgSeg: g.seg,
+      collectionRate: g.covered > 0 ? ((g.giving / g.covered) * 100).toFixed(1) : 0,
+      segregationRate: g.giving > 0 ? ((g.seg / g.giving) * 100).toFixed(1) : 0
     }));
   }, [filteredLogs, viewTimeframe]);
 
@@ -277,9 +295,12 @@ const App = () => {
         return stateMatch && wardMatch && supervisorMatch;
       })
       .map(block => {
-        const logs = filteredLogs.filter(d => d.blockId === block.id && !d.noCollection);
-        const totalGiving = logs.reduce((s, l) => s + Number(l.hhGiving || 0), 0);
-        const totalSeg = logs.reduce((s, l) => s + Number(l.hhSegregating || 0), 0);
+        const logs = filteredLogs.filter(d => d.blockId === block.id);
+        const validLogs = logs.filter(l => !l.noCollection);
+        const totalCovered = logs.reduce((s, l) => s + Number(l.hhCovered || 0), 0);
+        const totalGiving = validLogs.reduce((s, l) => s + Number(l.hhGiving || 0), 0);
+        const totalSeg = validLogs.reduce((s, l) => s + Number(l.hhSegregating || 0), 0);
+        const absences = logs.filter(l => l.noCollection);
         const supervisor = config.supervisors.find(s => s.id === block.supervisorId);
         const ward = config.wards.find(w => w.id === block.wardId);
         
@@ -288,19 +309,62 @@ const App = () => {
           name: block.name,
           ward: ward?.name || 'N/A',
           supervisor: supervisor?.name || 'Unassigned',
+          covered: totalCovered,
           giving: totalGiving,
           seg: totalSeg,
+          absences: absences.length,
+          lastReason: absences.length > 0 ? absences[absences.length - 1].reason : null,
           rate: totalGiving > 0 ? ((totalSeg / totalGiving) * 100).toFixed(1) : 0
         };
       });
   }, [filteredLogs, config, dashState, dashWard, dashSupervisor]);
 
+  // --- CSV Export Logic ---
+  const handleExportCSV = () => {
+    const filename = `SWM_Report_${viewTimeframe}_${dashStartDate}_to_${dashEndDate}.csv`;
+    const headers = [
+      "Time Period", 
+      "Total HH Covered", 
+      "Total HH Giving Waste", 
+      "Total HH Segregating Waste", 
+      "Average Giving (%)", 
+      "Segregation Rate (%)",
+      "Absence Incidents"
+    ];
+    
+    const rows = timeSeriesData.map(d => [
+      d.name,
+      d.covered,
+      d.giving,
+      d.seg,
+      d.collectionRate,
+      d.segregationRate,
+      d.absences
+    ]);
+
+    const csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.body.appendChild(document.createElement("a"));
+    link.href = url;
+    link.download = filename;
+    link.click();
+    document.body.removeChild(link);
+    showStatus('success', `Exported ${viewTimeframe} report.`);
+  };
+
   if (loading) return (
     <div className="flex flex-col items-center justify-center h-screen bg-slate-50 gap-4">
       <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-      <p className="text-slate-500 font-medium animate-pulse text-sm">Loading Tracker...</p>
+      <p className="text-slate-500 font-medium animate-pulse text-sm">Loading Management Panel...</p>
     </div>
   );
+
+  // Summary Totals for Dashboard Cards
+  const totalCoveredVal = filteredLogs.reduce((s, v) => s + Number(v.hhCovered || 0), 0);
+  const totalGivingVal = filteredLogs.reduce((s, v) => s + (v.noCollection ? 0 : Number(v.hhGiving || 0)), 0);
+  const totalSegVal = filteredLogs.reduce((s, v) => s + (v.noCollection ? 0 : Number(v.hhSegregating || 0)), 0);
+  const totalAbsencesVal = filteredLogs.filter(v => v.noCollection).length;
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans pb-20 md:pb-0 flex flex-col md:flex-row">
@@ -313,7 +377,7 @@ const App = () => {
         </div>
       )}
 
-      {/* Navigation */}
+      {/* Sidebar / Mobile Nav */}
       <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 flex justify-around p-2 z-50 md:sticky md:top-0 md:flex-col md:w-64 md:h-screen md:justify-start md:gap-2 md:p-6 shadow-sm">
         <div className="hidden md:flex p-2 font-black text-2xl text-blue-600 mb-8 items-center gap-3">
           <Globe size={32} /> <span>SWM India</span>
@@ -345,15 +409,21 @@ const App = () => {
             <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div>
                 <h1 className="text-3xl font-bold tracking-tight text-slate-800">Operational Dashboard</h1>
-                <p className="text-slate-500 font-medium">Performance monitoring across India</p>
+                <p className="text-slate-500 font-medium">India SWM Performance Tracking</p>
               </div>
-              <div className="flex bg-white border border-slate-200 rounded-xl p-1 shadow-sm">
-                {['daily', 'weekly', 'monthly'].map(t => (
-                  <button key={t} onClick={() => setViewTimeframe(t)} className={`px-4 py-1.5 rounded-lg text-xs font-bold capitalize transition ${viewTimeframe === t ? 'bg-blue-600 text-white' : 'text-slate-500'}`}>{t}</button>
-                ))}
+              <div className="flex items-center gap-3">
+                <button onClick={handleExportCSV} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-xl text-sm font-bold shadow-lg shadow-blue-100 hover:bg-blue-700 transition">
+                  <Download size={16}/> Export Report
+                </button>
+                <div className="flex bg-white border border-slate-200 rounded-xl p-1 shadow-sm">
+                  {['daily', 'weekly', 'monthly'].map(t => (
+                    <button key={t} onClick={() => setViewTimeframe(t)} className={`px-4 py-1.5 rounded-lg text-xs font-bold capitalize transition ${viewTimeframe === t ? 'bg-slate-100 text-blue-600 shadow-inner' : 'text-slate-500'}`}>{t}</button>
+                  ))}
+                </div>
               </div>
             </header>
 
+            {/* Management Filter Hub */}
             <div className="bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 items-end">
                 <div className="space-y-1">
@@ -391,36 +461,82 @@ const App = () => {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              {[
-                { label: 'HH Collected', value: filteredLogs.reduce((s,v) => s + (v.noCollection ? 0 : Number(v.hhGiving || 0)), 0).toLocaleString(), icon: Database, color: 'text-blue-600', bg: 'bg-blue-50' },
-                { label: 'HH Segregating', value: filteredLogs.reduce((s,v) => s + (v.noCollection ? 0 : Number(v.hhSegregating || 0)), 0).toLocaleString(), icon: TrendingUp, color: 'text-purple-600', bg: 'bg-purple-50' },
-                { label: 'Efficiency Rate', value: (filteredLogs.reduce((s,v) => s + (v.noCollection ? 0 : Number(v.hhGiving || 0)), 0) > 0 ? ((filteredLogs.reduce((s,v) => s + (v.noCollection ? 0 : Number(v.hhSegregating || 0)), 0) / filteredLogs.reduce((s,v) => s + (v.noCollection ? 0 : Number(v.hhGiving || 0)), 0)) * 100).toFixed(1) : 0) + '%', icon: CheckCircle2, color: 'text-green-600', bg: 'bg-green-50' }
-              ].map((card, i) => (
-                <div key={i} className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
-                  <div className={`${card.bg} ${card.color} p-4 rounded-2xl`}><card.icon size={28}/></div>
-                  <div>
-                    <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">{card.label}</p>
-                    <p className="text-2xl font-black text-slate-800 leading-tight">{card.value}</p>
-                  </div>
+            {/* Redesigned Metrics Grid for Management */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+              <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5">
+                <div className="bg-blue-50 text-blue-600 p-4 rounded-2xl"><Users size={28}/></div>
+                <div>
+                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Total HH Covered</p>
+                  <p className="text-2xl font-black text-slate-800 leading-tight">{totalCoveredVal.toLocaleString()}</p>
                 </div>
-              ))}
+              </div>
+              <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5">
+                <div className="bg-indigo-50 text-indigo-600 p-4 rounded-2xl"><Database size={28}/></div>
+                <div>
+                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">HH Giving Waste</p>
+                  <p className="text-2xl font-black text-slate-800 leading-tight">{totalGivingVal.toLocaleString()}</p>
+                  <p className="text-[10px] text-indigo-400 font-bold">{(totalCoveredVal > 0 ? (totalGivingVal/totalCoveredVal*100).toFixed(1) : 0)}% giving rate</p>
+                </div>
+              </div>
+              <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5">
+                <div className="bg-green-50 text-green-600 p-4 rounded-2xl"><CheckCircle2 size={28}/></div>
+                <div>
+                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Segregation Rate</p>
+                  <p className="text-2xl font-black text-slate-800 leading-tight">{(totalGivingVal > 0 ? ((totalSegVal / totalGivingVal) * 100).toFixed(1) : 0)}%</p>
+                  <p className="text-[10px] text-green-400 font-bold">{totalSegVal.toLocaleString()} HH Segregating</p>
+                </div>
+              </div>
+              <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5">
+                <div className="bg-red-50 text-red-600 p-4 rounded-2xl"><Ban size={28}/></div>
+                <div>
+                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Collection Gaps</p>
+                  <p className="text-2xl font-black text-slate-800 leading-tight">{totalAbsencesVal}</p>
+                  <p className="text-[10px] text-red-400 font-bold">Absence incidents</p>
+                </div>
+              </div>
             </div>
 
-            <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
-              <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8"><History className="text-blue-500" size={20}/> Performance Trend Line</h3>
-              <div className="h-80">
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={timeSeriesData}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94a3b8'}} />
-                    <YAxis axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94a3b8'}} />
-                    <Tooltip contentStyle={{ borderRadius: '20px', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)' }} />
-                    <Legend iconType="circle" />
-                    <Line type="monotone" dataKey="avgGiving" name="HH Collection" stroke="#3b82f6" strokeWidth={4} dot={{r: 4, fill: '#3b82f6'}} />
-                    <Line type="monotone" dataKey="avgSeg" name="HH Segregation" stroke="#a855f7" strokeWidth={4} dot={{r: 4, fill: '#a855f7'}} />
-                  </LineChart>
-                </ResponsiveContainer>
+            {/* Performance Trend Chart */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-2 bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
+                <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8"><History className="text-blue-500" size={20}/> Service & Segregation Trends</h3>
+                <div className="h-80">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={timeSeriesData}>
+                      <defs>
+                        <linearGradient id="colorGiving" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3b82f6" stopOpacity={0.1}/><stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/></linearGradient>
+                        <linearGradient id="colorSeg" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#a855f7" stopOpacity={0.1}/><stop offset="95%" stopColor="#a855f7" stopOpacity={0}/></linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                      <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94a3b8'}} />
+                      <YAxis axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94a3b8'}} />
+                      <Tooltip 
+                        contentStyle={{ borderRadius: '20px', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)' }}
+                        itemStyle={{ fontSize: '12px', fontWeight: 'bold' }}
+                      />
+                      <Legend iconType="circle" />
+                      <Area type="monotone" dataKey="avgGiving" name="HH Collection" stroke="#3b82f6" strokeWidth={4} fillOpacity={1} fill="url(#colorGiving)" />
+                      <Area type="monotone" dataKey="avgSeg" name="HH Segregation" stroke="#a855f7" strokeWidth={4} fillOpacity={1} fill="url(#colorSeg)" />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+              
+              <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100 flex flex-col justify-between">
+                <div>
+                  <h3 className="font-bold text-lg text-slate-700 mb-6 flex items-center gap-3"><AlertCircle className="text-red-500" size={20}/> Absence Analytics</h3>
+                  <div className="space-y-4">
+                    <p className="text-xs text-slate-500 leading-relaxed font-medium">Monitoring collection gaps helps identify fleet issues or staff absenteeism.</p>
+                    <div className="p-4 bg-slate-50 rounded-2xl">
+                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Gap Days</p>
+                      <p className="text-xl font-black text-red-600">{totalAbsencesVal} Incidents</p>
+                    </div>
+                  </div>
+                </div>
+                <div className="p-5 bg-blue-50 rounded-[28px] border border-blue-100 mt-6">
+                  <p className="text-[10px] font-black text-blue-400 uppercase tracking-widest mb-1">Efficiency Target</p>
+                  <p className="text-sm font-bold text-blue-700">Aim for &gt;90% Segregation Rate across all operational blocks.</p>
+                </div>
               </div>
             </div>
 
@@ -431,16 +547,26 @@ const App = () => {
               <div className="overflow-x-auto">
                 <table className="w-full text-left">
                   <thead className="bg-slate-50 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                    <tr><th className="px-8 py-5">Unit</th><th className="px-6 py-5">Lead</th><th className="px-6 py-5 text-center">HH Giving</th><th className="px-6 py-5 text-center">HH Seg.</th><th className="px-8 py-5">Efficiency</th></tr>
+                    <tr><th className="px-8 py-5">Unit</th><th className="px-6 py-5">Lead</th><th className="px-6 py-5 text-center">Covered</th><th className="px-6 py-5 text-center">Collection</th><th className="px-8 py-5">Segregation Efficiency</th><th className="px-6 py-5">Gaps</th></tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
                     {performanceTable.map((block) => (
                       <tr key={block.id} className="hover:bg-blue-50/20 transition group">
                         <td className="px-8 py-5"><div className="font-black text-slate-700">{block.name}</div><div className="text-[10px] text-slate-400 font-bold mt-0.5">{block.ward}</div></td>
                         <td className="px-6 py-5 font-bold text-slate-500 text-sm">{block.supervisor}</td>
-                        <td className="px-6 py-5 font-black text-blue-600 text-lg text-center">{block.giving}</td>
-                        <td className="px-6 py-5 font-black text-purple-600 text-lg text-center">{block.seg}</td>
+                        <td className="px-6 py-5 font-black text-slate-700 text-center">{block.covered}</td>
+                        <td className="px-6 py-5 font-black text-blue-600 text-center">{block.giving}</td>
                         <td className="px-8 py-5"><div className="flex items-center gap-3"><div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden max-w-[100px]"><div className={`h-full rounded-full ${Number(block.rate) > 80 ? 'bg-green-500' : 'bg-amber-500'}`} style={{width: `${block.rate}%`}} /></div><span className="text-sm font-black text-slate-700">{block.rate}%</span></div></td>
+                        <td className="px-6 py-5">
+                          {block.absences > 0 ? (
+                            <div className="text-red-500 text-[10px] font-bold flex flex-col">
+                              <span>{block.absences} Day(s)</span>
+                              <span className="text-[8px] italic opacity-70 truncate max-w-[100px]">{block.lastReason}</span>
+                            </div>
+                          ) : (
+                            <span className="text-slate-300 text-xs">—</span>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -453,7 +579,7 @@ const App = () => {
         {/* FIELD ENTRY TAB */}
         {activeTab === 'entry' && (
           <div className="max-w-xl mx-auto py-6 animate-in slide-in-from-bottom-6">
-            <header className="text-center mb-8"><h1 className="text-2xl font-black text-slate-800">Field Data Entry</h1></header>
+            <header className="text-center mb-8"><h1 className="text-2xl font-black text-slate-800">Field Data Intake</h1></header>
             <div className="bg-white p-8 rounded-[40px] shadow-2xl border border-slate-100 space-y-6">
               <div className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
@@ -473,19 +599,19 @@ const App = () => {
                   </div>
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 text-center block">Operating Unit (Block)</label>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 text-center block">Operating Block</label>
                   <select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none" value={entryBlock} onChange={(e) => setEntryBlock(e.target.value)}>
                     <option value="">Select Block</option>
                     {config.blocks.filter(b => b.wardId === entryWard).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
                   </select>
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 text-center block">Collection Date</label>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 text-center block">Reporting Date</label>
                   <input type="date" className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none text-center" value={formData.date} onChange={(e) => setFormData({...formData, date: e.target.value})} />
                 </div>
               </div>
 
-              {/* Special Toggle for No Collection */}
+              {/* Toggle for Absence */}
               <div className="flex items-center gap-3 p-5 bg-red-50 rounded-3xl border border-red-100">
                 <input 
                   type="checkbox" 
@@ -494,12 +620,12 @@ const App = () => {
                   checked={formData.noCollection} 
                   onChange={(e) => setFormData({...formData, noCollection: e.target.checked})}
                 />
-                <label htmlFor="noCollection" className="text-red-700 font-bold text-sm select-none">No collection data today</label>
+                <label htmlFor="noCollection" className="text-red-700 font-bold text-sm select-none">No collection data for this day</label>
               </div>
 
               {formData.noCollection ? (
                 <div className="space-y-1 animate-in slide-in-from-top-2">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Reason for Absence</label>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Reason for Gap</label>
                   <select 
                     className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-white font-bold outline-none" 
                     value={formData.reason} 
@@ -531,7 +657,7 @@ const App = () => {
                 </div>
               )}
 
-              <button onClick={submitDailyLog} className="w-full bg-blue-600 text-white py-5 rounded-[24px] font-black text-lg shadow-xl active:scale-[0.98] transition-all">Submit Report</button>
+              <button onClick={submitDailyLog} className="w-full bg-blue-600 text-white py-5 rounded-[24px] font-black text-lg shadow-xl active:scale-[0.98] transition-all">Submit Daily Entry</button>
             </div>
           </div>
         )}
@@ -539,7 +665,7 @@ const App = () => {
         {/* SETUP TAB */}
         {activeTab === 'setup' && (
           <div className="max-w-4xl mx-auto py-6 space-y-8 animate-in slide-in-from-bottom-6">
-            <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800">Project Config</h1></header>
+            <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800">Operational Config</h1></header>
 
             {/* TEAM */}
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
@@ -547,10 +673,10 @@ const App = () => {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {config.supervisors.map((fs, idx) => (
                   <div key={fs.id} className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100 transition focus-within:border-blue-300">
-                    <input placeholder="Name" className="flex-1 bg-transparent border-none outline-none font-bold" value={fs.name} onChange={(e) => {
+                    <input placeholder="Name" className="flex-1 bg-transparent border-none outline-none font-bold text-slate-700" value={fs.name} onChange={(e) => {
                       const newSupers = [...config.supervisors]; newSupers[idx].name = e.target.value; setConfig({...config, supervisors: newSupers});
                     }} />
-                    <button onClick={() => removeSupervisor(fs.id)} className="text-red-400 hover:text-red-600"><Trash2 size={18}/></button>
+                    <button onClick={() => removeSupervisor(fs.id)} className="text-red-400 hover:text-red-600 transition"><Trash2 size={18}/></button>
                   </div>
                 ))}
               </div>
@@ -558,7 +684,7 @@ const App = () => {
 
             {/* GEOGRAPHY */}
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Globe className="text-blue-500" /> Geography</h3><button onClick={() => setConfig({...config, states: [...config.states, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add State</button></div>
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Globe className="text-blue-500" /> Geography Hierarchy</h3><button onClick={() => setConfig({...config, states: [...config.states, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add State</button></div>
               <div className="space-y-6">
                 {config.states.map((st, sIdx) => (
                   <div key={st.id} className="border border-slate-100 rounded-[24px] overflow-hidden">
@@ -566,8 +692,8 @@ const App = () => {
                       <input className="flex-1 bg-transparent font-black text-blue-600 outline-none text-lg" placeholder="State" value={st.name} onChange={(e) => {
                         const newStates = [...config.states]; newStates[sIdx].name = e.target.value; setConfig({...config, states: newStates});
                       }} />
-                      <button onClick={() => setConfig({...config, wards: [...config.wards, { id: Date.now().toString(), stateId: st.id, name: '' }]})} className="text-[10px] bg-white border border-slate-200 px-3 py-1.5 rounded-lg font-bold">+ Ward</button>
-                      <button onClick={() => setConfig({...config, states: config.states.filter(s => s.id !== st.id)})} className="text-red-400"><Trash2 size={16}/></button>
+                      <button onClick={() => setConfig({...config, wards: [...config.wards, { id: Date.now().toString(), stateId: st.id, name: '' }]})} className="text-[10px] bg-white border border-slate-200 px-3 py-1.5 rounded-lg font-bold">+ Add Ward</button>
+                      <button onClick={() => setConfig({...config, states: config.states.filter(s => s.id !== st.id)})} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button>
                     </div>
                     <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-2">
                       {config.wards.filter(w => w.stateId === st.id).map((wd) => (
@@ -589,9 +715,9 @@ const App = () => {
               <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Database className="text-blue-500" /> Operational Blocks</h3><button onClick={() => setConfig({...config, blocks: [...config.blocks, { id: Date.now().toString(), name: '', wardId: '', supervisorId: '', totalHH: 0 }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Block</button></div>
               <div className="space-y-4">
                 {config.blocks.map((bl, bIdx) => (
-                  <div key={bl.id} className="bg-slate-50 p-5 rounded-[24px] border border-slate-100 space-y-4">
+                  <div key={bl.id} className="bg-slate-50 p-5 rounded-[24px] border border-slate-100 space-y-4 transition hover:bg-slate-100/50">
                     <div className="flex items-center gap-4">
-                      <input className="flex-1 bg-transparent font-black text-slate-800 outline-none text-lg border-b-2 border-slate-200" placeholder="Block Name" value={bl.name} onChange={(e) => {
+                      <input className="flex-1 bg-transparent font-black text-slate-800 outline-none text-lg border-b-2 border-slate-200 focus:border-blue-500 transition" placeholder="Block Name" value={bl.name} onChange={(e) => {
                         const newBlocks = [...config.blocks]; newBlocks[bIdx].name = e.target.value; setConfig({...config, blocks: newBlocks});
                       }} />
                       <button onClick={() => setConfig({...config, blocks: config.blocks.filter(b => b.id !== bl.id)})} className="text-red-400"><Trash2 size={16}/></button>
@@ -612,7 +738,7 @@ const App = () => {
               </div>
             </section>
 
-            <button onClick={() => saveConfig(config)} className="w-full py-6 bg-gradient-to-r from-green-600 to-green-700 text-white rounded-[32px] font-black text-xl shadow-2xl">Publish All Configuration</button>
+            <button onClick={() => saveConfig(config)} className="w-full py-6 bg-gradient-to-r from-green-600 to-green-700 text-white rounded-[32px] font-black text-xl shadow-2xl transition hover:scale-[1.01] active:scale-[0.99]">Publish Operational Config</button>
           </div>
         )}
       </main>
