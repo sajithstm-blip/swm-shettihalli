@@ -15,7 +15,7 @@ import {
   query 
 } from 'firebase/firestore';
 import { 
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, LineChart, Line 
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LineChart, Line 
 } from 'recharts';
 import { 
   LayoutDashboard, 
@@ -43,19 +43,24 @@ import {
 } from 'lucide-react';
 
 // --- Firebase Initialization ---
-const firebaseConfig = {
-  apiKey: "AIzaSyDns4NX18h_dCrZ3hyyFzHT-bUvdwdRLw0",
-  authDomain: "admob-app-id-4497163742.firebaseapp.com",
-  databaseURL: "https://admob-app-id-4497163742.firebaseio.com",
-  projectId: "admob-app-id-4497163742",
-  storageBucket: "admob-app-id-4497163742.firebasestorage.app",
-  messagingSenderId: "944948366460",
-  appId: "1:944948366460:web:da3388aeb8af102302cdf9"
-};
+// Detect if we are in the Canvas environment or deployed on Vercel
+const isCanvas = typeof __firebase_config !== 'undefined';
+
+const firebaseConfig = isCanvas 
+  ? JSON.parse(__firebase_config) 
+  : {
+      apiKey: "YOUR_API_KEY",
+      authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+      projectId: "YOUR_PROJECT_ID",
+      storageBucket: "YOUR_PROJECT_ID.appspot.com",
+      messagingSenderId: "YOUR_SENDER_ID",
+      appId: "YOUR_APP_ID"
+    };
+
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'swm-national-v1';
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'swm-national-v1'; 
 
 const formatDate = (date) => date.toISOString().split('T')[0];
 
@@ -103,7 +108,7 @@ const App = () => {
   useEffect(() => {
     const initAuth = async () => {
       try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+        if (isCanvas && typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
           await signInWithCustomToken(auth, __initial_auth_token);
         } else {
           await signInAnonymously(auth);
@@ -121,6 +126,7 @@ const App = () => {
   useEffect(() => {
     if (!user) return;
 
+    // Path must use even segments for doc(): artifacts/appId/public/data/app_config/settings (6 segments)
     const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'app_config', 'settings');
     const unsubConfig = onSnapshot(configRef, (docSnap) => {
       if (docSnap.exists()) {
@@ -133,12 +139,17 @@ const App = () => {
         });
       }
       setLoading(false);
+    }, (err) => {
+      console.error("Config Error:", err);
+      setLoading(false);
     });
 
     const dataRef = collection(db, 'artifacts', appId, 'public', 'data', 'daily_logs');
     const unsubData = onSnapshot(query(dataRef), (snapshot) => {
       const logs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setDailyData(logs);
+    }, (err) => {
+      console.error("Data Error:", err);
     });
 
     return () => {
@@ -258,10 +269,7 @@ const App = () => {
       const stateMatch = dashState === 'all' || log.stateId === dashState;
       const wardMatch = dashWard === 'all' || log.wardId === dashWard;
       const supervisorMatch = dashSupervisor === 'all' || log.supervisorId === dashSupervisor;
-      
-      // Range check
       const dateMatch = log.date >= dashStartDate && log.date <= dashEndDate;
-      
       return stateMatch && wardMatch && supervisorMatch && dateMatch;
     });
   }, [dailyData, dashState, dashWard, dashSupervisor, dashStartDate, dashEndDate]);
@@ -383,7 +391,6 @@ const App = () => {
               </div>
             </header>
 
-            {/* Range & Geography Filter Suite */}
             <div className="bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 items-end">
                 <div className="space-y-1">
@@ -408,7 +415,6 @@ const App = () => {
                   </select>
                 </div>
 
-                {/* Date Range Selectors */}
                 <div className="space-y-1 lg:col-span-2 flex items-center gap-2">
                   <div className="flex-1">
                     <label className="text-[10px] font-bold text-slate-400 uppercase ml-1 flex items-center gap-1"><Calendar size={10}/> Start Date</label>
@@ -434,7 +440,7 @@ const App = () => {
 
               <div className="flex justify-between items-center pt-2 border-t border-slate-50">
                 <p className="text-[10px] text-slate-400 font-bold uppercase flex items-center gap-2">
-                  <Search size={12}/> Showing data for {new Date(dashStartDate).toLocaleDateString()} to {new Date(dashEndDate).toLocaleDateString()}
+                  <Search size={12}/> Range: {new Date(dashStartDate).toLocaleDateString()} to {new Date(dashEndDate).toLocaleDateString()}
                 </p>
                 <button 
                   onClick={() => {
@@ -446,12 +452,11 @@ const App = () => {
                   }}
                   className="bg-slate-100 text-slate-600 px-4 py-2 rounded-xl text-xs font-bold hover:bg-slate-200 transition"
                 >
-                  Clear All Filters
+                  Reset Filters
                 </button>
               </div>
             </div>
 
-            {/* Metrics Row */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               {[
                 { label: 'HH Collected', value: filteredLogs.reduce((s,v) => s + Number(v.hhGiving), 0).toLocaleString(), icon: Database, color: 'text-blue-600', bg: 'bg-blue-50', sub: 'In selected range' },
@@ -470,11 +475,10 @@ const App = () => {
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              {/* Chart Area */}
               <div className="lg:col-span-2 bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
                 <div className="flex items-center justify-between mb-8">
                   <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3">
-                    <History className="text-blue-500" size={20}/> {viewTimeframe.charAt(0).toUpperCase() + viewTimeframe.slice(1)} Performance Trend
+                    <History className="text-blue-500" size={20}/> Trend Analysis
                   </h3>
                 </div>
                 <div className="h-80">
@@ -485,59 +489,53 @@ const App = () => {
                       <YAxis axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94a3b8'}} />
                       <Tooltip contentStyle={{ borderRadius: '20px', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)' }} />
                       <Legend iconType="circle" wrapperStyle={{paddingTop: '20px'}} />
-                      <Line type="monotone" dataKey="avgGiving" name="HH Collection" stroke="#3b82f6" strokeWidth={4} dot={{r: 4, fill: '#3b82f6'}} activeDot={{r: 6}} />
-                      <Line type="monotone" dataKey="avgSeg" name="HH Segregation" stroke="#a855f7" strokeWidth={4} dot={{r: 4, fill: '#a855f7'}} activeDot={{r: 6}} />
+                      <Line type="monotone" dataKey="avgGiving" name="Collected" stroke="#3b82f6" strokeWidth={4} dot={{r: 4, fill: '#3b82f6'}} />
+                      <Line type="monotone" dataKey="avgSeg" name="Segregated" stroke="#a855f7" strokeWidth={4} dot={{r: 4, fill: '#a855f7'}} />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
               </div>
 
-              {/* Range Summary / Insights */}
-              <div className="bg-gradient-to-br from-blue-600 to-indigo-700 p-8 rounded-[40px] text-white flex flex-col justify-between shadow-xl shadow-blue-200">
+              <div className="bg-gradient-to-br from-blue-600 to-indigo-700 p-8 rounded-[40px] text-white flex flex-col justify-between shadow-xl">
                 <div>
                   <h4 className="text-blue-100 font-bold uppercase tracking-widest text-[10px] mb-2">Range Focus</h4>
                   <p className="text-xl font-black mb-6 leading-relaxed">
-                    Analyzing Period: <br/>
+                    Period Summary: <br/>
                     <span className="text-white/80 font-medium text-sm">{new Date(dashStartDate).toLocaleDateString('en-IN', {day:'numeric', month:'short'})} — {new Date(dashEndDate).toLocaleDateString('en-IN', {day:'numeric', month:'short', year: 'numeric'})}</span>
                   </p>
                   
                   <div className="space-y-4">
                     <div className="bg-white/10 p-4 rounded-2xl backdrop-blur-sm border border-white/10">
-                      <p className="text-[10px] text-blue-200 font-bold uppercase tracking-wider">Reporting Blocks</p>
+                      <p className="text-[10px] text-blue-200 font-bold uppercase tracking-wider">Active Blocks</p>
                       <p className="text-xl font-bold">{new Set(filteredLogs.map(l => l.blockId)).size} / {config.blocks.length}</p>
-                    </div>
-                    <div className="bg-white/10 p-4 rounded-2xl backdrop-blur-sm border border-white/10">
-                      <p className="text-[10px] text-blue-200 font-bold uppercase tracking-wider">Active Supervisors</p>
-                      <p className="text-xl font-bold">{new Set(filteredLogs.map(l => l.supervisorId)).size}</p>
                     </div>
                   </div>
                 </div>
                 
                 <button 
                   onClick={() => {
-                    const csvRows = [["Block", "Ward", "Supervisor", "HH Giving (Total)", "HH Segregating (Total)", "Average Rate (%)"]];
+                    const csvRows = [["Block", "Ward", "Supervisor", "HH Giving", "HH Segregating", "Rate"]];
                     performanceTable.forEach(p => csvRows.push([p.name, p.ward, p.supervisor, p.giving, p.seg, p.rate]));
                     const csvContent = csvRows.map(e => e.join(",")).join("\n");
                     const blob = new Blob([csvContent], { type: 'text/csv' });
                     const url = window.URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.setAttribute('href', url);
-                    a.setAttribute('download', `SWM_CustomRange_Report_${dashStartDate}_to_${dashEndDate}.csv`);
+                    a.setAttribute('download', `SWM_Report.csv`);
                     a.click();
                   }}
-                  className="mt-8 bg-white text-blue-600 py-4 rounded-2xl font-black text-sm flex items-center justify-center gap-2 hover:bg-blue-50 transition shadow-lg"
+                  className="mt-8 bg-white text-blue-600 py-4 rounded-2xl font-black text-sm flex items-center justify-center gap-2"
                 >
-                  <Download size={18}/> Export Custom Range
+                  <Download size={18}/> Export Results
                 </button>
               </div>
             </div>
 
-            {/* Performance Breakdown Table */}
             <div className="bg-white rounded-[40px] shadow-sm border border-slate-100 overflow-hidden mb-12">
               <div className="p-8 border-b border-slate-50 flex items-center justify-between">
                 <div>
-                  <h2 className="font-black text-slate-800 text-xl">Block Breakdown (Total in Range)</h2>
-                  <p className="text-xs text-slate-400 font-medium">Accumulated collection metrics for the specified dates</p>
+                  <h2 className="font-black text-slate-800 text-xl">Operational Breakdown</h2>
+                  <p className="text-xs text-slate-400 font-medium">Accumulated collection metrics for specified dates</p>
                 </div>
               </div>
               <div className="overflow-x-auto">
@@ -546,21 +544,21 @@ const App = () => {
                     <tr>
                       <th className="px-8 py-5">Geography</th>
                       <th className="px-6 py-5">Team Lead</th>
-                      <th className="px-6 py-5 text-center">Total Giving</th>
-                      <th className="px-6 py-5 text-center">Total Seg.</th>
-                      <th className="px-8 py-5">Efficiency Rate</th>
+                      <th className="px-6 py-5 text-center">Giving</th>
+                      <th className="px-6 py-5 text-center">Segregating</th>
+                      <th className="px-8 py-5">Rate</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
                     {performanceTable.map((block, i) => (
                       <tr key={i} className="hover:bg-blue-50/30 transition group">
                         <td className="px-8 py-5">
-                          <div className="font-black text-slate-700 group-hover:text-blue-600 transition">{block.name}</div>
-                          <div className="text-[10px] text-slate-400 font-bold flex items-center gap-1 mt-0.5"><MapPin size={8}/> {block.ward}</div>
+                          <div className="font-black text-slate-700">{block.name}</div>
+                          <div className="text-[10px] text-slate-400 font-bold mt-0.5">{block.ward}</div>
                         </td>
                         <td className="px-6 py-5 font-bold text-slate-500 text-sm">{block.supervisor}</td>
-                        <td className="px-6 py-5 font-black text-blue-600 text-lg text-center">{block.giving.toLocaleString()}</td>
-                        <td className="px-6 py-5 font-black text-purple-600 text-lg text-center">{block.seg.toLocaleString()}</td>
+                        <td className="px-6 py-5 font-black text-blue-600 text-lg text-center">{block.giving}</td>
+                        <td className="px-6 py-5 font-black text-purple-600 text-lg text-center">{block.seg}</td>
                         <td className="px-8 py-5">
                           <div className="flex items-center gap-3">
                             <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden max-w-[100px]">
@@ -571,11 +569,6 @@ const App = () => {
                         </td>
                       </tr>
                     ))}
-                    {performanceTable.length === 0 && (
-                      <tr>
-                        <td colSpan="5" className="px-8 py-20 text-center text-slate-300 italic font-medium">No activity recorded for this date range. Try expanding your search.</td>
-                      </tr>
-                    )}
                   </tbody>
                 </table>
               </div>
@@ -648,7 +641,7 @@ const App = () => {
 
                 <button 
                   onClick={submitDailyLog}
-                  className="w-full bg-gradient-to-r from-blue-600 to-blue-700 text-white py-5 rounded-[24px] font-black text-lg shadow-xl shadow-blue-200 hover:shadow-2xl transition-all active:scale-[0.98]"
+                  className="w-full bg-gradient-to-r from-blue-600 to-blue-700 text-white py-5 rounded-[24px] font-black text-lg shadow-xl"
                 >
                   Confirm & Submit
                 </button>
@@ -657,10 +650,6 @@ const App = () => {
               <div className="bg-white p-8 rounded-[40px] shadow-2xl shadow-blue-100/50 border border-slate-100 text-center space-y-8">
                 <div className="p-12 border-4 border-dashed border-slate-100 rounded-[32px] bg-slate-50/50 flex flex-col items-center gap-6">
                   <div className="bg-blue-100 text-blue-600 p-6 rounded-full shadow-inner"><Upload size={48}/></div>
-                  <div className="space-y-2">
-                    <p className="text-xl font-black text-slate-800">CSV Bulk Upload</p>
-                    <p className="text-sm text-slate-400 font-medium px-8">Process large datasets from Google Sheets or Excel directly into the database.</p>
-                  </div>
                   <input type="file" accept=".csv" onChange={handleBulkUpload} ref={fileInputRef} className="hidden" id="csv-upload-main" />
                   <label htmlFor="csv-upload-main" className="px-10 py-4 bg-blue-600 text-white rounded-2xl font-black cursor-pointer hover:bg-blue-700 shadow-lg shadow-blue-100 transition">Select CSV File</label>
                 </div>
@@ -674,20 +663,20 @@ const App = () => {
           <div className="max-w-4xl mx-auto py-6 space-y-8 animate-in fade-in duration-700">
             <header className="space-y-2">
               <h1 className="text-3xl font-black text-slate-800">Hierarchy & Team Setup</h1>
-              <p className="text-slate-500 font-medium">Configure national geography and assign field supervisors</p>
+              <p className="text-slate-500 font-medium">Configure team and assigned blocks</p>
             </header>
 
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
               <div className="flex items-center justify-between mb-8">
                 <h3 className="text-xl font-black flex items-center gap-3"><UserCheck className="text-blue-500" /> Field Supervisors</h3>
-                <button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold hover:bg-blue-700 shadow-md transition">Add Member</button>
+                <button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Member</button>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {config.supervisors.map((fs, idx) => (
-                  <div key={fs.id} className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100 group">
+                  <div key={fs.id} className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100">
                     <input 
-                      placeholder="Enter Full Name" 
-                      className="flex-1 bg-transparent border-none outline-none font-bold text-slate-700 placeholder:text-slate-300"
+                      placeholder="Name" 
+                      className="flex-1 bg-transparent border-none outline-none font-bold"
                       value={fs.name}
                       onChange={(e) => {
                         const newSupers = [...config.supervisors];
@@ -695,7 +684,7 @@ const App = () => {
                         setConfig({...config, supervisors: newSupers});
                       }}
                     />
-                    <button onClick={() => setConfig({...config, supervisors: config.supervisors.filter(s => s.id !== fs.id)})} className="text-slate-300 hover:text-red-500 transition"><Trash2 size={18}/></button>
+                    <button onClick={() => setConfig({...config, supervisors: config.supervisors.filter(s => s.id !== fs.id)})} className="text-red-500"><Trash2 size={18}/></button>
                   </div>
                 ))}
               </div>
@@ -703,33 +692,32 @@ const App = () => {
 
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
               <div className="flex items-center justify-between mb-8">
-                <h3 className="text-xl font-black flex items-center gap-3"><Globe className="text-blue-500" /> Geography Hierarchy</h3>
-                <button onClick={() => setConfig({...config, states: [...config.states, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold hover:bg-blue-700 shadow-md">Add State</button>
+                <h3 className="text-xl font-black flex items-center gap-3"><Globe className="text-blue-500" /> Geography</h3>
+                <button onClick={() => setConfig({...config, states: [...config.states, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add State</button>
               </div>
               
               <div className="space-y-6">
                 {config.states.map((st, sIdx) => (
                   <div key={st.id} className="border border-slate-100 rounded-[24px] overflow-hidden">
                     <div className="bg-slate-50 p-4 flex items-center gap-4">
-                      <input className="flex-1 bg-transparent font-black text-blue-600 outline-none text-lg" placeholder="State Name (e.g. Karnataka)" value={st.name} onChange={(e) => {
+                      <input className="flex-1 bg-transparent font-black text-blue-600 outline-none text-lg" placeholder="State Name" value={st.name} onChange={(e) => {
                         const newStates = [...config.states];
                         newStates[sIdx].name = e.target.value;
                         setConfig({...config, states: newStates});
                       }} />
-                      <button onClick={() => setConfig({...config, wards: [...config.wards, { id: Date.now().toString(), stateId: st.id, name: '' }]})} className="text-[10px] bg-white border border-slate-200 px-3 py-1.5 rounded-lg font-bold text-slate-600">+ Add Ward</button>
-                      <button onClick={() => setConfig({...config, states: config.states.filter(s => s.id !== st.id)})} className="text-red-300 hover:text-red-500"><Trash2 size={16}/></button>
+                      <button onClick={() => setConfig({...config, wards: [...config.wards, { id: Date.now().toString(), stateId: st.id, name: '' }]})} className="text-[10px] bg-white border border-slate-200 px-3 py-1.5 rounded-lg font-bold">+ Ward</button>
+                      <button onClick={() => setConfig({...config, states: config.states.filter(s => s.id !== st.id)})} className="text-red-500"><Trash2 size={16}/></button>
                     </div>
                     <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-2">
                       {config.wards.filter(w => w.stateId === st.id).map((wd, wIdx) => (
                         <div key={wd.id} className="flex items-center gap-2 bg-white border border-slate-100 p-2 rounded-xl">
-                          <MapPin size={14} className="text-slate-300"/>
-                          <input className="flex-1 text-sm font-bold outline-none" placeholder="Ward/District Name" value={wd.name} onChange={(e) => {
+                          <input className="flex-1 text-sm font-bold outline-none" placeholder="Ward Name" value={wd.name} onChange={(e) => {
                             const newWards = [...config.wards];
                             const idx = config.wards.findIndex(w => w.id === wd.id);
                             newWards[idx].name = e.target.value;
                             setConfig({...config, wards: newWards});
                           }} />
-                          <button onClick={() => setConfig({...config, wards: config.wards.filter(w => w.id !== wd.id)})} className="text-slate-200 hover:text-red-500">&times;</button>
+                          <button onClick={() => setConfig({...config, wards: config.wards.filter(w => w.id !== wd.id)})} className="text-red-500">&times;</button>
                         </div>
                       ))}
                     </div>
@@ -740,14 +728,14 @@ const App = () => {
 
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
               <div className="flex items-center justify-between mb-8">
-                <h3 className="text-xl font-black flex items-center gap-3"><Database className="text-blue-500" /> Operational Blocks</h3>
-                <button onClick={() => setConfig({...config, blocks: [...config.blocks, { id: Date.now().toString(), name: '', wardId: '', supervisorId: '', totalHH: 0 }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold hover:bg-blue-700 shadow-md">Add Block</button>
+                <h3 className="text-xl font-black flex items-center gap-3"><Database className="text-blue-500" /> Blocks</h3>
+                <button onClick={() => setConfig({...config, blocks: [...config.blocks, { id: Date.now().toString(), name: '', wardId: '', supervisorId: '', totalHH: 0 }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Block</button>
               </div>
               <div className="space-y-4">
                 {config.blocks.map((bl, bIdx) => (
-                  <div key={bl.id} className="flex flex-col md:flex-row gap-4 bg-slate-50 p-5 rounded-[24px] border border-slate-100 relative group">
+                  <div key={bl.id} className="flex flex-col md:flex-row gap-4 bg-slate-50 p-5 rounded-[24px] border border-slate-100 relative">
                     <div className="flex-1 space-y-2">
-                      <input className="w-full bg-transparent font-black text-slate-800 outline-none text-lg border-b-2 border-slate-200 focus:border-blue-500 transition" placeholder="Block/Street Name" value={bl.name} onChange={(e) => {
+                      <input className="w-full bg-transparent font-black text-slate-800 outline-none text-lg border-b-2 border-slate-200 focus:border-blue-500" placeholder="Block Name" value={bl.name} onChange={(e) => {
                         const newBlocks = [...config.blocks];
                         newBlocks[bIdx].name = e.target.value;
                         setConfig({...config, blocks: newBlocks});
@@ -758,34 +746,34 @@ const App = () => {
                           newBlocks[bIdx].wardId = e.target.value;
                           setConfig({...config, blocks: newBlocks});
                         }}>
-                          <option value="">Select Ward</option>
-                          {config.wards.map(w => <option key={w.id} value={w.id}>{w.name} ({config.states.find(s => s.id === w.stateId)?.name})</option>)}
+                          <option value="">Ward</option>
+                          {config.wards.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
                         </select>
                         <select className="bg-white border border-slate-200 rounded-lg p-2 text-[10px] font-bold outline-none" value={bl.supervisorId} onChange={(e) => {
                           const newBlocks = [...config.blocks];
                           newBlocks[bIdx].supervisorId = e.target.value;
                           setConfig({...config, blocks: newBlocks});
                         }}>
-                          <option value="">Assigned FS</option>
+                          <option value="">FS</option>
                           {config.supervisors.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                         </select>
                       </div>
                     </div>
-                    <div className="w-24">
-                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1">Total HH</label>
-                      <input type="number" className="w-full bg-white border border-slate-200 rounded-lg p-2 text-center font-black outline-none" value={bl.totalHH} onChange={(e) => {
+                    <div className="w-24 text-center">
+                      <label className="text-[10px] font-black text-slate-400 uppercase">Total HH</label>
+                      <input type="number" className="w-full bg-white border border-slate-200 rounded-lg p-2 text-center font-black" value={bl.totalHH} onChange={(e) => {
                         const newBlocks = [...config.blocks];
                         newBlocks[bIdx].totalHH = Number(e.target.value);
                         setConfig({...config, blocks: newBlocks});
                       }} />
                     </div>
-                    <button onClick={() => setConfig({...config, blocks: config.blocks.filter(b => b.id !== bl.id)})} className="absolute -top-2 -right-2 bg-white text-red-400 shadow-sm border border-slate-100 rounded-full w-8 h-8 flex items-center justify-center opacity-0 group-hover:opacity-100 transition shadow-lg">&times;</button>
+                    <button onClick={() => setConfig({...config, blocks: config.blocks.filter(b => b.id !== bl.id)})} className="text-red-500">&times;</button>
                   </div>
                 ))}
               </div>
             </section>
 
-            <button onClick={() => saveConfig(config)} className="w-full py-6 bg-gradient-to-r from-green-600 to-green-700 text-white rounded-[32px] font-black text-xl shadow-2xl shadow-green-100 hover:scale-[1.01] transition transform active:scale-[0.98]">Publish National Config</button>
+            <button onClick={() => saveConfig(config)} className="w-full py-6 bg-gradient-to-r from-green-600 to-green-700 text-white rounded-[32px] font-black text-xl">Publish Config</button>
           </div>
         )}
 
