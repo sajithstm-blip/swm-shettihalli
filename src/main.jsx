@@ -88,9 +88,9 @@ const App = () => {
   const [statusMsg, setStatusMsg] = useState({ type: '', text: '' });
   const fileInputRef = useRef(null);
 
-  // Global Filters
+  // Global Filters for Management
   const [dashWard, setDashWard] = useState('all');
-  const [dashBlocks, setDashBlocks] = useState([]); // Multi-select array
+  const [dashBlocks, setDashBlocks] = useState([]); // Array for multi-select
   const [dashSupervisor, setDashSupervisor] = useState('all');
   
   // Date Range State
@@ -188,7 +188,7 @@ const App = () => {
     const newSupers = config.supervisors.filter(s => s.id !== id);
     const newBlocks = config.blocks.map(b => b.supervisorId === id ? { ...b, supervisorId: '' } : b);
     setConfig({ ...config, supervisors: newSupers, blocks: newBlocks });
-    showStatus('success', 'Supervisor removed. Assigned blocks updated.');
+    showStatus('success', 'Supervisor removed and unassigned from blocks.');
   };
 
   const toggleBlockFilter = (id) => {
@@ -200,7 +200,7 @@ const App = () => {
   const submitDailyLog = async () => {
     if (!user) return;
     if (!entryBlock) {
-      showStatus('error', "Please select a State, Ward, and Block.");
+      showStatus('error', "Please select State, Ward, and Block.");
       return;
     }
 
@@ -215,12 +215,12 @@ const App = () => {
       
       await setDoc(logRef, {
         ...formData,
-        stateId: state?.id,
-        stateName: state?.name,
-        wardId: ward?.id,
-        wardName: ward?.name,
+        stateId: state?.id || '',
+        stateName: state?.name || '',
+        wardId: ward?.id || '',
+        wardName: ward?.name || '',
         blockId: entryBlock,
-        blockName: block?.name,
+        blockName: block?.name || '',
         supervisorId: supervisor?.id || 'unassigned',
         supervisorName: supervisor?.name || 'Unassigned',
         timestamp: new Date().toISOString()
@@ -240,7 +240,7 @@ const App = () => {
     }
   };
 
-  // --- Management Dashboard Analytics Logic ---
+  // --- Management Analytics Logic ---
   const filteredLogs = useMemo(() => {
     return dailyData.filter(log => {
       const wardMatch = dashWard === 'all' || log.wardId === dashWard;
@@ -283,6 +283,7 @@ const App = () => {
       }
     });
 
+    // Strictly sort by date to fix tooltip duplication issues
     return Object.values(groups).sort((a, b) => a.rawDate.localeCompare(b.rawDate)).map(g => ({
       ...g,
       avgGiving: g.giving,
@@ -325,19 +326,19 @@ const App = () => {
       });
   }, [filteredLogs, config, dashWard, dashBlocks, dashSupervisor]);
 
-  // --- Enhanced CSV Export Logic ---
+  // --- Enhanced CSV Export Logic (Management Requirements) ---
   const handleExportCSV = () => {
-    const filename = `SWM_Detailed_Report_${dashStartDate}_to_${dashEndDate}.csv`;
+    const filename = `SWM_Management_Report_${dashStartDate}_to_${dashEndDate}.csv`;
     const headers = [
-      "Date", 
-      "Ward", 
-      "Block", 
+      "Reporting Date", 
+      "Ward Name", 
+      "Block Name", 
       "Field Supervisor", 
-      "Total HH Covered", 
-      "Total HH Giving Waste", 
-      "Total HH Segregating", 
-      "Giving Rate (%)", 
-      "Segregation Rate (%)",
+      "HH Covered", 
+      "HH Giving Waste", 
+      "HH Segregating Waste", 
+      "Giving Efficiency (%)", 
+      "Segregation Quality (%)",
       "Status",
       "Gap Reason"
     ];
@@ -355,7 +356,7 @@ const App = () => {
         log.noCollection ? 0 : log.hhSegregating,
         log.noCollection ? 0 : givingRate,
         log.noCollection ? 0 : segRate,
-        log.noCollection ? "No Collection" : "Collected",
+        log.noCollection ? "Absence" : "Active",
         log.noCollection ? log.reason : ""
       ];
     });
@@ -368,13 +369,13 @@ const App = () => {
     link.download = filename;
     link.click();
     document.body.removeChild(link);
-    showStatus('success', `Detailed CSV report exported.`);
+    showStatus('success', `Management CSV exported.`);
   };
 
   if (loading) return (
     <div className="flex flex-col items-center justify-center h-screen bg-slate-50 gap-4">
       <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-      <p className="text-slate-500 font-medium animate-pulse text-sm">Loading Management Panel...</p>
+      <p className="text-slate-500 font-medium animate-pulse text-sm">Synchronizing Cloud Data...</p>
     </div>
   );
 
@@ -425,12 +426,12 @@ const App = () => {
           <div className="space-y-6 animate-in fade-in duration-500">
             <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div>
-                <h1 className="text-3xl font-bold tracking-tight text-slate-800">Operational Dashboard</h1>
-                <p className="text-slate-500 font-medium">Monitoring SWM efficiency & field team performance</p>
+                <h1 className="text-3xl font-bold tracking-tight text-slate-800">Operational Analytics</h1>
+                <p className="text-slate-500 font-medium">Monitoring coverage & field performance</p>
               </div>
               <div className="flex items-center gap-3">
                 <button onClick={handleExportCSV} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-xl text-sm font-bold shadow-lg shadow-blue-100 hover:bg-blue-700 transition">
-                  <Download size={16}/> Download Report
+                  <Download size={16}/> Management CSV
                 </button>
                 <div className="flex bg-white border border-slate-200 rounded-xl p-1 shadow-sm">
                   {['daily', 'weekly', 'monthly'].map(t => (
@@ -452,7 +453,7 @@ const App = () => {
                 </div>
                 
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Operating Blocks (Multi-Select)</label>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Filter Blocks (Multi-Select)</label>
                   <div className="max-h-32 overflow-y-auto bg-slate-50 border border-slate-200 rounded-xl p-2 space-y-1">
                     {config.blocks.filter(b => dashWard === 'all' || b.wardId === dashWard).map(block => (
                       <button 
@@ -464,14 +465,14 @@ const App = () => {
                         <span className="truncate">{block.name}</span>
                       </button>
                     ))}
-                    {config.blocks.length === 0 && <p className="text-[10px] text-slate-400 italic p-2 text-center">No blocks setup</p>}
+                    {config.blocks.length === 0 && <p className="text-[10px] text-slate-400 italic p-2 text-center">Setup units first</p>}
                   </div>
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Field Lead</label>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Supervisor</label>
                   <select className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-sm outline-none" value={dashSupervisor} onChange={(e) => setDashSupervisor(e.target.value)}>
-                    <option value="all">All Supervisors</option>
+                    <option value="all">All Team Leads</option>
                     {config.supervisors.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                   </select>
                 </div>
@@ -487,28 +488,28 @@ const App = () => {
               </div>
             </div>
 
-            {/* Management Metrics Grid */}
+            {/* Redesigned Metrics Grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5">
                 <div className="bg-blue-50 text-blue-600 p-4 rounded-2xl"><Users size={28}/></div>
                 <div>
-                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">HH Service Area</p>
+                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Total HH Covered</p>
                   <p className="text-2xl font-black text-slate-800 leading-tight">{totalCoveredSum.toLocaleString()}</p>
-                  <p className="text-[10px] text-blue-400 font-bold mt-1">Total coverage in range</p>
+                  <p className="text-[10px] text-blue-400 font-bold mt-1">Area footprint</p>
                 </div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5">
                 <div className="bg-indigo-50 text-indigo-600 p-4 rounded-2xl"><Database size={28}/></div>
                 <div>
-                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Actual Waste Collection</p>
+                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Collection Yield</p>
                   <p className="text-2xl font-black text-slate-800 leading-tight">{totalGivingSum.toLocaleString()}</p>
-                  <p className="text-[10px] text-indigo-400 font-bold mt-1">{(totalCoveredSum > 0 ? (totalGivingSum/totalCoveredSum*100).toFixed(1) : 0)}% service rate</p>
+                  <p className="text-[10px] text-indigo-400 font-bold mt-1">{(totalCoveredSum > 0 ? (totalGivingSum/totalCoveredSum*100).toFixed(1) : 0)}% giving rate</p>
                 </div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5">
                 <div className="bg-green-50 text-green-600 p-4 rounded-2xl"><CheckCircle2 size={28}/></div>
                 <div>
-                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Segregation Efficiency</p>
+                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Efficiency Rate</p>
                   <p className="text-2xl font-black text-slate-800 leading-tight">{(totalGivingSum > 0 ? ((totalSegSum / totalGivingSum) * 100).toFixed(1) : 0)}%</p>
                   <p className="text-[10px] text-green-400 font-bold mt-1">{totalSegSum.toLocaleString()} HH Segregating</p>
                 </div>
@@ -516,16 +517,16 @@ const App = () => {
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5">
                 <div className="bg-red-50 text-red-600 p-4 rounded-2xl"><Ban size={28}/></div>
                 <div>
-                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Operational Gaps</p>
+                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Service Gaps</p>
                   <p className="text-2xl font-black text-slate-800 leading-tight">{totalAbsencesCount}</p>
-                  <p className="text-[10px] text-red-400 font-bold mt-1">No-collection incidents</p>
+                  <p className="text-[10px] text-red-400 font-bold mt-1">Non-collection events</p>
                 </div>
               </div>
             </div>
 
-            {/* Performance Chart with Fixed Dates */}
+            {/* Chart Area */}
             <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
-              <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8"><History className="text-blue-500" size={20}/> Operations Trend Analysis</h3>
+              <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8"><History className="text-blue-500" size={20}/> Performance Trend Analysis</h3>
               <div className="h-80">
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={timeSeriesData}>
@@ -552,13 +553,13 @@ const App = () => {
             {/* Block Level Breakdown Table */}
             <div className="bg-white rounded-[40px] shadow-sm border border-slate-100 overflow-hidden mb-12">
               <div className="p-8 border-b border-slate-50">
-                <h2 className="font-black text-slate-800 text-xl">Operational Breakdown by Block</h2>
-                <p className="text-slate-400 text-xs mt-1">Detailed summary per operational unit in selected date range</p>
+                <h2 className="font-black text-slate-800 text-xl">Operating Unit Breakdown</h2>
+                <p className="text-slate-400 text-xs mt-1">Detailed performance per operational unit</p>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left">
                   <thead className="bg-slate-50 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                    <tr><th className="px-8 py-5">Block Name</th><th className="px-6 py-5">Field Supervisor</th><th className="px-6 py-5 text-center">HH Covered</th><th className="px-6 py-5 text-center">Collected</th><th className="px-8 py-5">Segregation %</th><th className="px-6 py-5">Status</th></tr>
+                    <tr><th className="px-8 py-5">Block Name</th><th className="px-6 py-5">Supervisor</th><th className="px-6 py-5 text-center">HH Covered</th><th className="px-6 py-5 text-center">Collection</th><th className="px-8 py-5">Segregation %</th><th className="px-6 py-5">Availability</th></tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
                     {performanceTable.map((block) => (
@@ -575,14 +576,11 @@ const App = () => {
                               <span className="text-[8px] italic opacity-70 truncate max-w-[100px]">{block.lastReason}</span>
                             </div>
                           ) : (
-                            <div className="text-green-600 text-[10px] font-bold">100% Availability</div>
+                            <div className="text-green-600 text-[10px] font-bold">100% On-Duty</div>
                           )}
                         </td>
                       </tr>
                     ))}
-                    {performanceTable.length === 0 && (
-                      <tr><td colSpan="6" className="px-8 py-10 text-center text-slate-400 italic">No data available for this criteria.</td></tr>
-                    )}
                   </tbody>
                 </table>
               </div>
@@ -593,7 +591,7 @@ const App = () => {
         {/* FIELD ENTRY TAB */}
         {activeTab === 'entry' && (
           <div className="max-w-xl mx-auto py-6 animate-in slide-in-from-bottom-6">
-            <header className="text-center mb-8"><h1 className="text-2xl font-black text-slate-800">Field Data Input</h1></header>
+            <header className="text-center mb-8"><h1 className="text-2xl font-black text-slate-800">Field Data Entry</h1></header>
             <div className="bg-white p-8 rounded-[40px] shadow-2xl border border-slate-100 space-y-6">
               <div className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
@@ -613,18 +611,19 @@ const App = () => {
                   </div>
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 text-center block">Operational Block</label>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 text-center block">Operating Block</label>
                   <select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none" value={entryBlock} onChange={(e) => setEntryBlock(e.target.value)}>
                     <option value="">Select Block/Street</option>
                     {config.blocks.filter(b => b.wardId === entryWard).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
                   </select>
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 text-center block">Date of Collection</label>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 text-center block">Collection Date</label>
                   <input type="date" className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none text-center" value={formData.date} onChange={(e) => setFormData({...formData, date: e.target.value})} />
                 </div>
               </div>
 
+              {/* Special Toggle for Absence */}
               <div className="flex items-center gap-3 p-5 bg-red-50 rounded-3xl border border-red-100">
                 <input 
                   type="checkbox" 
@@ -633,13 +632,17 @@ const App = () => {
                   checked={formData.noCollection} 
                   onChange={(e) => setFormData({...formData, noCollection: e.target.checked})}
                 />
-                <label htmlFor="noCollection" className="text-red-700 font-bold text-sm select-none">Mark: No Collection Today</label>
+                <label htmlFor="noCollection" className="text-red-700 font-bold text-sm select-none">Mark: No Collection Data Today</label>
               </div>
 
               {formData.noCollection ? (
                 <div className="space-y-1 animate-in slide-in-from-top-2">
                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Reason for Gap</label>
-                  <select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-white font-bold outline-none" value={formData.reason} onChange={(e) => setFormData({...formData, reason: e.target.value})}>
+                  <select 
+                    className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-white font-bold outline-none" 
+                    value={formData.reason} 
+                    onChange={(e) => setFormData({...formData, reason: e.target.value})}
+                  >
                     <option value="Vehicle didn't come">1) Vehicle didn't come</option>
                     <option value="Vehicle breakdown">2) Vehicle breakdown</option>
                     <option value="Collection staff not available">3) Collection staff not available</option>
@@ -661,7 +664,7 @@ const App = () => {
                 </div>
               )}
 
-              <button onClick={submitDailyLog} className="w-full bg-blue-600 text-white py-5 rounded-[24px] font-black text-lg shadow-xl active:scale-[0.98] transition-all">Submit Log</button>
+              <button onClick={submitDailyLog} className="w-full bg-blue-600 text-white py-5 rounded-[24px] font-black text-lg shadow-xl active:scale-[0.98] transition-all">Submit Entry</button>
             </div>
           </div>
         )}
@@ -669,14 +672,15 @@ const App = () => {
         {/* SETUP TAB */}
         {activeTab === 'setup' && (
           <div className="max-w-4xl mx-auto py-6 space-y-8 animate-in slide-in-from-bottom-6">
-            <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800">Operational Setup</h1></header>
+            <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800">Hierarchy Setup</h1></header>
 
+            {/* TEAM */}
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><UserCheck className="text-blue-500"/> Field Supervisors</h3><button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add supervisor</button></div>
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><UserCheck className="text-blue-500"/> Team Management</h3><button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Lead</button></div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {config.supervisors.map((fs, idx) => (
-                  <div key={fs.id} className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                    <input placeholder="Name" className="flex-1 bg-transparent border-none outline-none font-bold text-slate-700" value={fs.name} onChange={(e) => {
+                  <div key={fs.id} className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100 transition focus-within:border-blue-300">
+                    <input placeholder="Enter Name" className="flex-1 bg-transparent border-none outline-none font-bold text-slate-700" value={fs.name} onChange={(e) => {
                       const newSupers = [...config.supervisors]; newSupers[idx].name = e.target.value; setConfig({...config, supervisors: newSupers});
                     }} />
                     <button onClick={() => removeSupervisor(fs.id)} className="text-red-400 hover:text-red-600 transition"><Trash2 size={18}/></button>
@@ -685,8 +689,9 @@ const App = () => {
               </div>
             </section>
 
+            {/* GEOGRAPHY */}
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Globe className="text-blue-500" /> State & Ward Mapping</h3><button onClick={() => setConfig({...config, states: [...config.states, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add State</button></div>
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Globe className="text-blue-500" /> Wards Mapping</h3><button onClick={() => setConfig({...config, states: [...config.states, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add State</button></div>
               <div className="space-y-6">
                 {config.states.map((st, sIdx) => (
                   <div key={st.id} className="border border-slate-100 rounded-[24px] overflow-hidden">
@@ -712,8 +717,9 @@ const App = () => {
               </div>
             </section>
 
+            {/* BLOCKS */}
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Database className="text-blue-500" /> Operational Units (Blocks)</h3><button onClick={() => setConfig({...config, blocks: [...config.blocks, { id: Date.now().toString(), name: '', wardId: '', supervisorId: '', totalHH: 0 }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Block</button></div>
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Database className="text-blue-500" /> Operational Blocks</h3><button onClick={() => setConfig({...config, blocks: [...config.blocks, { id: Date.now().toString(), name: '', wardId: '', supervisorId: '', totalHH: 0 }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Block</button></div>
               <div className="space-y-4">
                 {config.blocks.map((bl, bIdx) => (
                   <div key={bl.id} className="bg-slate-50 p-5 rounded-[24px] border border-slate-100 space-y-4 transition hover:bg-slate-100/50">
@@ -729,7 +735,7 @@ const App = () => {
                       }}><option value="">Select Ward</option>{config.wards.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select>
                       <select className="bg-white border border-slate-200 rounded-lg p-2 text-xs font-bold" value={bl.supervisorId} onChange={(e) => {
                         const newBlocks = [...config.blocks]; newBlocks[bIdx].supervisorId = e.target.value; setConfig({...config, blocks: newBlocks});
-                      }}><option value="">Select Lead</option>{config.supervisors.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select>
+                      }}><option value="">Assign Lead</option>{config.supervisors.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select>
                       <div className="flex items-center gap-2"><label className="text-[10px] font-black text-slate-400 uppercase">Total HH</label><input type="number" className="w-full bg-white border border-slate-200 rounded-lg p-2 font-black text-xs" value={bl.totalHH} onChange={(e) => {
                         const newBlocks = [...config.blocks]; newBlocks[bIdx].totalHH = Number(e.target.value); setConfig({...config, blocks: newBlocks});
                       }} /></div>
