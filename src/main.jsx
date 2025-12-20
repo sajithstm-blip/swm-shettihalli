@@ -44,9 +44,7 @@ import {
 
 /**
  * --- Firebase Configuration ---
- * Your credentials have been integrated below.
- * When running in this Canvas, it uses the environment's config.
- * When deployed to Vercel, it uses your specific AdMob/Firebase project keys.
+ * Integrated with your project specific credentials: admob-app-id-4497163742
  */
 const isCanvas = typeof __firebase_config !== 'undefined';
 
@@ -89,7 +87,7 @@ const App = () => {
   const [dashWard, setDashWard] = useState('all');
   const [dashSupervisor, setDashSupervisor] = useState('all');
   
-  // Date Range State (Default to last 7 days)
+  // Date Range State
   const [dashStartDate, setDashStartDate] = useState(() => {
     const d = new Date();
     d.setDate(d.getDate() - 7);
@@ -132,7 +130,7 @@ const App = () => {
   useEffect(() => {
     if (!user) return;
 
-    // Fetch Hierarchy Configuration
+    // Fetch Project Configuration (Geography & Team)
     const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'app_config', 'settings');
     const unsubConfig = onSnapshot(configRef, (docSnap) => {
       if (docSnap.exists()) {
@@ -146,17 +144,17 @@ const App = () => {
       }
       setLoading(false);
     }, (err) => {
-      console.error("Config Sync Error:", err);
+      console.error("Config Error:", err);
       setLoading(false);
     });
 
-    // Fetch All Daily Logs
+    // Fetch Daily Logs
     const dataRef = collection(db, 'artifacts', appId, 'public', 'data', 'daily_logs');
     const unsubData = onSnapshot(query(dataRef), (snapshot) => {
       const logs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setDailyData(logs);
     }, (err) => {
-      console.error("Data Sync Error:", err);
+      console.error("Data Error:", err);
     });
 
     return () => {
@@ -165,26 +163,29 @@ const App = () => {
     };
   }, [user]);
 
-  // --- UI Actions ---
+  // UI Feedback
   const showStatus = (type, text) => {
     setStatusMsg({ type, text: String(text) });
     setTimeout(() => setStatusMsg({ type: '', text: '' }), 5000);
   };
 
+  // Logic to save Hierarchy/Team settings
   const saveConfig = async (newConfig) => {
     if (!user) return;
     try {
       const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'app_config', 'settings');
       await setDoc(configRef, newConfig);
-      showStatus('success', 'Hierarchy and team settings saved!');
+      showStatus('success', 'Project configuration published successfully!');
     } catch (e) {
       showStatus('error', 'Failed to save configuration.');
     }
   };
 
+  // Logic to submit a single daily report
   const submitDailyLog = async () => {
+    if (!user) return;
     if (!entryBlock) {
-      showStatus('error', "Please select State, Ward, and Block.");
+      showStatus('error', "Please select a State, Ward, and Block.");
       return;
     }
 
@@ -192,11 +193,6 @@ const App = () => {
     const ward = config.wards.find(w => w.id === block?.wardId);
     const state = config.states.find(s => s.id === ward?.stateId);
     const supervisor = config.supervisors.find(s => s.id === block?.supervisorId);
-
-    if (formData.hhGiving > formData.hhCovered || formData.hhSegregating > formData.hhGiving) {
-      showStatus('error', "Validation Error: Segregating <= Giving <= Covered");
-      return;
-    }
 
     try {
       const logId = `${formData.date}_${entryBlock}`;
@@ -215,16 +211,17 @@ const App = () => {
         timestamp: new Date().toISOString()
       });
       
-      showStatus('success', `Saved entry for ${block.name}`);
+      showStatus('success', `Data saved for ${block.name}`);
       setFormData({ ...formData, hhCovered: 0, hhGiving: 0, hhSegregating: 0 });
     } catch (e) {
-      showStatus('error', "Submission failed. Check connection.");
+      showStatus('error', "Submission failed. Please check your rules.");
     }
   };
 
+  // CSV Bulk Upload Logic
   const handleBulkUpload = (event) => {
     const file = event.target.files[0];
-    if (!file) return;
+    if (!file || !user) return;
 
     const reader = new FileReader();
     reader.onload = async (e) => {
@@ -239,7 +236,7 @@ const App = () => {
       for (let i = 1; i < lines.length; i++) {
         const values = lines[i].split(',').map(v => v.trim());
         const row = {};
-        headers.forEach((h, idx) => row[h] = values[index]);
+        headers.forEach((h, idx) => row[h] = values[idx]);
 
         const block = config.blocks.find(b => b.name.toLowerCase() === row['block name']?.toLowerCase());
         
@@ -271,13 +268,13 @@ const App = () => {
           } catch (err) { errorCount++; }
         } else { errorCount++; }
       }
-      showStatus('success', `Bulk Upload: ${successCount} entries processed, ${errorCount} errors.`);
+      showStatus('success', `Bulk upload complete: ${successCount} saved, ${errorCount} failed.`);
       if (fileInputRef.current) fileInputRef.current.value = '';
     };
     reader.readAsText(file);
   };
 
-  // --- Analytics Logic ---
+  // Analytics Calculations
   const filteredLogs = useMemo(() => {
     return dailyData.filter(log => {
       const stateMatch = dashState === 'all' || log.stateId === dashState;
@@ -295,7 +292,7 @@ const App = () => {
       if (viewTimeframe === 'weekly') {
         const d = new Date(log.date);
         const day = d.getDay(), diff = d.getDate() - day + (day === 0 ? -6 : 1);
-        key = `Week ${new Date(d.setDate(diff)).toLocaleDateString('en-IN', {day:'numeric', month:'short'})}`;
+        key = `W/O ${new Date(d.setDate(diff)).toLocaleDateString('en-IN', {day:'numeric', month:'short'})}`;
       } else if (viewTimeframe === 'monthly') {
         key = new Date(log.date).toLocaleString('en-IN', {month:'short', year:'numeric'});
       }
@@ -344,14 +341,14 @@ const App = () => {
   if (loading) return (
     <div className="flex flex-col items-center justify-center h-screen bg-slate-50 gap-4">
       <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-      <p className="text-slate-500 font-medium">Loading SWM Tracker...</p>
+      <p className="text-slate-500 font-medium animate-pulse text-sm">Synchronizing Cloud Data...</p>
     </div>
   );
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans pb-20 md:pb-0 flex flex-col md:flex-row">
       
-      {/* Notifications */}
+      {/* Toast Messages */}
       {statusMsg.text && (
         <div className={`fixed top-4 right-4 z-[100] p-4 rounded-xl shadow-2xl flex items-center gap-3 animate-in slide-in-from-top-4 ${
           statusMsg.type === 'success' ? 'bg-green-600 text-white' : 'bg-red-600 text-white'
@@ -361,7 +358,7 @@ const App = () => {
         </div>
       )}
 
-      {/* Navigation */}
+      {/* Sidebar Navigation */}
       <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 flex justify-around p-2 z-50 md:sticky md:top-0 md:flex-col md:w-64 md:h-screen md:justify-start md:gap-2 md:p-6 shadow-sm">
         <div className="hidden md:flex p-2 font-black text-2xl text-blue-600 mb-8 items-center gap-3">
           <Globe size={32} /> <span>SWM India</span>
@@ -369,7 +366,7 @@ const App = () => {
         {[
           { id: 'dashboard', label: 'Analytics', icon: LayoutDashboard },
           { id: 'entry', label: 'Field Entry', icon: PlusCircle },
-          { id: 'setup', label: 'Settings', icon: Settings }
+          { id: 'setup', label: 'Setup', icon: Settings }
         ].map(item => (
           <button 
             key={item.id}
@@ -388,13 +385,13 @@ const App = () => {
 
       <main className="flex-1 pt-6 px-4 md:pt-10 md:px-10 max-w-7xl overflow-x-hidden">
         
-        {/* ANALYTICS VIEW */}
+        {/* DASHBOARD TAB */}
         {activeTab === 'dashboard' && (
           <div className="space-y-6 animate-in fade-in duration-500">
             <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div>
-                <h1 className="text-3xl font-bold tracking-tight text-slate-800">SWM Performance</h1>
-                <p className="text-slate-500 font-medium">Consolidated field metrics across {viewTimeframe} view</p>
+                <h1 className="text-3xl font-bold tracking-tight text-slate-800">Operational Dashboard</h1>
+                <p className="text-slate-500 font-medium">Monitoring {viewTimeframe} performance</p>
               </div>
               <div className="flex bg-white border border-slate-200 rounded-xl p-1 shadow-sm">
                 {['daily', 'weekly', 'monthly'].map(t => (
@@ -413,46 +410,46 @@ const App = () => {
             <div className="bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 items-end">
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1 flex items-center gap-1">State</label>
-                  <select className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-sm outline-none" value={dashState} onChange={(e) => {setDashState(e.target.value); setDashWard('all');}}>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">State</label>
+                  <select className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-sm outline-none" value={dashState} onChange={(e) => {setDashState(e.target.value); setDashWard('all');}}>
                     <option value="all">All States</option>
                     {config.states.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                   </select>
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1 flex items-center gap-1">Ward</label>
-                  <select className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-sm outline-none" value={dashWard} onChange={(e) => setDashWard(e.target.value)}>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Ward</label>
+                  <select className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-sm outline-none" value={dashWard} onChange={(e) => setDashWard(e.target.value)}>
                     <option value="all">All Wards</option>
                     {config.wards.filter(w => dashState === 'all' || w.stateId === dashState).map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
                   </select>
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1 flex items-center gap-1">Lead</label>
-                  <select className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-sm outline-none" value={dashSupervisor} onChange={(e) => setDashSupervisor(e.target.value)}>
-                    <option value="all">All Supervisors</option>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Supervisor</label>
+                  <select className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-sm outline-none" value={dashSupervisor} onChange={(e) => setDashSupervisor(e.target.value)}>
+                    <option value="all">All Team Leads</option>
                     {config.supervisors.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                   </select>
                 </div>
-                <div className="space-y-1 flex items-center gap-2 lg:col-span-2">
+                <div className="space-y-1 lg:col-span-2 flex items-center gap-2">
                   <div className="flex-1">
                     <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">From</label>
-                    <input type="date" className="w-full bg-blue-50 border border-blue-100 rounded-xl p-2 text-xs outline-none font-bold text-blue-700" value={dashStartDate} onChange={(e) => setDashStartDate(e.target.value)} />
+                    <input type="date" className="w-full bg-blue-50/50 border border-blue-100 rounded-xl p-2.5 text-xs outline-none font-bold text-blue-700" value={dashStartDate} onChange={(e) => setDashStartDate(e.target.value)} />
                   </div>
-                  <ArrowRight size={14} className="text-slate-300 mt-5" />
+                  <ArrowRight size={14} className="text-slate-300 mt-6" />
                   <div className="flex-1">
                     <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">To</label>
-                    <input type="date" className="w-full bg-blue-50 border border-blue-100 rounded-xl p-2 text-xs outline-none font-bold text-blue-700" value={dashEndDate} onChange={(e) => setDashEndDate(e.target.value)} />
+                    <input type="date" className="w-full bg-blue-50/50 border border-blue-100 rounded-xl p-2.5 text-xs outline-none font-bold text-blue-700" value={dashEndDate} onChange={(e) => setDashEndDate(e.target.value)} />
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* Top Cards */}
+            {/* Metrics */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               {[
-                { label: 'Collected', value: filteredLogs.reduce((s,v) => s + Number(v.hhGiving), 0).toLocaleString(), icon: Database, color: 'text-blue-600', bg: 'bg-blue-50' },
-                { label: 'Segregated', value: filteredLogs.reduce((s,v) => s + Number(v.hhSegregating), 0).toLocaleString(), icon: TrendingUp, color: 'text-purple-600', bg: 'bg-purple-50' },
-                { label: 'Segregation Rate', value: (filteredLogs.reduce((s,v) => s + Number(v.hhGiving), 0) > 0 ? ((filteredLogs.reduce((s,v) => s + Number(v.hhSegregating), 0) / filteredLogs.reduce((s,v) => s + Number(v.hhGiving), 0)) * 100).toFixed(1) : 0) + '%', icon: CheckCircle2, color: 'text-green-600', bg: 'bg-green-50' }
+                { label: 'HH Collected', value: filteredLogs.reduce((s,v) => s + Number(v.hhGiving), 0).toLocaleString(), icon: Database, color: 'text-blue-600', bg: 'bg-blue-50' },
+                { label: 'HH Segregating', value: filteredLogs.reduce((s,v) => s + Number(v.hhSegregating), 0).toLocaleString(), icon: TrendingUp, color: 'text-purple-600', bg: 'bg-purple-50' },
+                { label: 'Efficiency Rate', value: (filteredLogs.reduce((s,v) => s + Number(v.hhGiving), 0) > 0 ? ((filteredLogs.reduce((s,v) => s + Number(v.hhSegregating), 0) / filteredLogs.reduce((s,v) => s + Number(v.hhGiving), 0)) * 100).toFixed(1) : 0) + '%', icon: CheckCircle2, color: 'text-green-600', bg: 'bg-green-50' }
               ].map((card, i) => (
                 <div key={i} className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5">
                   <div className={`${card.bg} ${card.color} p-4 rounded-2xl`}><card.icon size={28}/></div>
@@ -464,10 +461,10 @@ const App = () => {
               ))}
             </div>
 
-            {/* Performance Chart */}
+            {/* Chart */}
             <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
               <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8">
-                <History className="text-blue-500" size={20}/> Trend Over Selected Period
+                <History className="text-blue-500" size={20}/> Performance Trend Line
               </h3>
               <div className="h-80">
                 <ResponsiveContainer width="100%" height="100%">
@@ -477,25 +474,27 @@ const App = () => {
                     <YAxis axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94a3b8'}} />
                     <Tooltip contentStyle={{ borderRadius: '20px', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)' }} />
                     <Legend iconType="circle" />
-                    <Line type="monotone" dataKey="avgGiving" name="Collected" stroke="#3b82f6" strokeWidth={4} dot={false} />
-                    <Line type="monotone" dataKey="avgSeg" name="Segregated" stroke="#a855f7" strokeWidth={4} dot={false} />
+                    <Line type="monotone" dataKey="avgGiving" name="HH Collection" stroke="#3b82f6" strokeWidth={4} dot={{r: 4, fill: '#3b82f6'}} />
+                    <Line type="monotone" dataKey="avgSeg" name="HH Segregation" stroke="#a855f7" strokeWidth={4} dot={{r: 4, fill: '#a855f7'}} />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
             </div>
 
-            {/* Detailed Table */}
+            {/* Table */}
             <div className="bg-white rounded-[40px] shadow-sm border border-slate-100 overflow-hidden mb-12">
               <div className="p-8 border-b border-slate-50 flex items-center justify-between">
-                <h2 className="font-black text-slate-800 text-xl">Operating Unit Breakdown</h2>
+                <h2 className="font-black text-slate-800 text-xl">Operational Breakdown (Range Total)</h2>
                 <button 
                   onClick={() => {
-                    const csv = performanceTable.map(row => `${row.name},${row.ward},${row.supervisor},${row.giving},${row.seg},${row.rate}%`).join('\n');
-                    const blob = new Blob([`Block,Ward,Supervisor,Giving,Segregating,Rate\n${csv}`], { type: 'text/csv' });
+                    const csvRows = [["Block", "Ward", "Lead", "HH Collected", "HH Segregating", "Rate (%)"]];
+                    performanceTable.forEach(p => csvRows.push([p.name, p.ward, p.supervisor, p.giving, p.seg, p.rate]));
+                    const csvContent = csvRows.map(e => e.join(",")).join("\n");
+                    const blob = new Blob([csvContent], { type: 'text/csv' });
                     const url = window.URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = `SWM_Report_${dashStartDate}.csv`;
+                    a.download = `SWM_Report_${dashStartDate}_to_${dashEndDate}.csv`;
                     a.click();
                   }}
                   className="bg-slate-50 text-slate-600 px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 hover:bg-slate-100 transition"
@@ -507,11 +506,11 @@ const App = () => {
                 <table className="w-full text-left">
                   <thead className="bg-slate-50 text-[10px] font-black text-slate-400 uppercase tracking-widest">
                     <tr>
-                      <th className="px-8 py-5">Block & Ward</th>
+                      <th className="px-8 py-5">Location</th>
                       <th className="px-6 py-5">Supervisor</th>
-                      <th className="px-6 py-5 text-center">Collected</th>
-                      <th className="px-6 py-5 text-center">Segregated</th>
-                      <th className="px-8 py-5">Rate</th>
+                      <th className="px-6 py-5 text-center">HH Giving</th>
+                      <th className="px-6 py-5 text-center">HH Seg.</th>
+                      <th className="px-8 py-5">Efficiency</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
@@ -519,7 +518,7 @@ const App = () => {
                       <tr key={block.id} className="hover:bg-blue-50/20 transition group">
                         <td className="px-8 py-5">
                           <div className="font-black text-slate-700">{block.name}</div>
-                          <div className="text-[10px] text-slate-400 font-bold mt-0.5">{block.ward}</div>
+                          <div className="text-[10px] text-slate-400 font-bold mt-0.5"><MapPin size={8} className="inline mr-1"/>{block.ward}</div>
                         </td>
                         <td className="px-6 py-5 font-bold text-slate-500 text-sm">{block.supervisor}</td>
                         <td className="px-6 py-5 font-black text-blue-600 text-lg text-center">{block.giving}</td>
@@ -534,6 +533,9 @@ const App = () => {
                         </td>
                       </tr>
                     ))}
+                    {performanceTable.length === 0 && (
+                      <tr><td colSpan="5" className="px-8 py-10 text-center text-slate-400 italic">No data found for this selection.</td></tr>
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -541,14 +543,14 @@ const App = () => {
           </div>
         )}
 
-        {/* FIELD ENTRY VIEW */}
+        {/* FIELD ENTRY TAB */}
         {activeTab === 'entry' && (
           <div className="max-w-xl mx-auto py-6 animate-in slide-in-from-bottom-6">
             <header className="text-center mb-8 space-y-2">
-              <h1 className="text-2xl font-black text-slate-800">Field Data Intake</h1>
+              <h1 className="text-2xl font-black text-slate-800">Daily Field Intake</h1>
               <div className="inline-flex p-1 bg-slate-200 rounded-2xl mt-4">
                 <button onClick={() => setEntryMode('single')} className={`px-6 py-2 rounded-xl text-sm font-bold transition ${entryMode === 'single' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>Form Entry</button>
-                <button onClick={() => setEntryMode('bulk')} className={`px-6 py-2 rounded-xl text-sm font-bold transition ${entryMode === 'bulk' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>Bulk Upload</button>
+                <button onClick={() => setEntryMode('bulk')} className={`px-6 py-2 rounded-xl text-sm font-bold transition ${entryMode === 'bulk' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}>Bulk CSV</button>
               </div>
             </header>
 
@@ -558,37 +560,37 @@ const App = () => {
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-1">
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">State</label>
-                      <select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold focus:border-blue-500 outline-none transition" value={entryState} onChange={(e) => {setEntryState(e.target.value); setEntryWard(''); setEntryBlock('');}}>
-                        <option value="">Choose State</option>
+                      <select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none" value={entryState} onChange={(e) => {setEntryState(e.target.value); setEntryWard(''); setEntryBlock('');}}>
+                        <option value="">Select State</option>
                         {config.states.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                       </select>
                     </div>
                     <div className="space-y-1">
                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Ward</label>
-                      <select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold focus:border-blue-500 outline-none transition" value={entryWard} onChange={(e) => {setEntryWard(e.target.value); setEntryBlock('');}}>
-                        <option value="">Choose Ward</option>
+                      <select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none" value={entryWard} onChange={(e) => {setEntryWard(e.target.value); setEntryBlock('');}}>
+                        <option value="">Select Ward</option>
                         {config.wards.filter(w => w.stateId === entryState).map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
                       </select>
                     </div>
                   </div>
                   <div className="space-y-1">
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 text-center block">Block / Street</label>
-                    <select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold focus:border-blue-500 outline-none transition" value={entryBlock} onChange={(e) => setEntryBlock(e.target.value)}>
-                      <option value="">Select Local Unit</option>
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 text-center block">Block / Street Unit</label>
+                    <select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none" value={entryBlock} onChange={(e) => setEntryBlock(e.target.value)}>
+                      <option value="">Select Block</option>
                       {config.blocks.filter(b => b.wardId === entryWard).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
                     </select>
                   </div>
                   <div className="space-y-1">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 text-center block">Collection Date</label>
-                    <input type="date" className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold focus:border-blue-500 outline-none transition text-center" value={formData.date} onChange={(e) => setFormData({...formData, date: e.target.value})} />
+                    <input type="date" className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none text-center" value={formData.date} onChange={(e) => setFormData({...formData, date: e.target.value})} />
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 gap-4 pt-4 border-t border-slate-50">
                   {[
                     { label: 'Households Covered', key: 'hhCovered', bg: 'bg-slate-50', text: 'text-slate-600' },
-                    { label: 'Households Giving Waste', key: 'hhGiving', bg: 'bg-blue-50', text: 'text-blue-700' },
-                    { label: 'Households Segregating', key: 'hhSegregating', bg: 'bg-purple-50', text: 'text-purple-700' }
+                    { label: 'HH Giving Waste', key: 'hhGiving', bg: 'bg-blue-50', text: 'text-blue-700' },
+                    { label: 'HH Segregating', key: 'hhSegregating', bg: 'bg-purple-50', text: 'text-purple-700' }
                   ].map(field => (
                     <div key={field.key} className={`${field.bg} p-5 rounded-3xl flex items-center justify-between border border-white/50 shadow-inner`}>
                       <span className={`${field.text} font-bold text-sm`}>{field.label}</span>
@@ -606,72 +608,67 @@ const App = () => {
                   onClick={submitDailyLog}
                   className="w-full bg-blue-600 text-white py-5 rounded-[24px] font-black text-lg shadow-xl shadow-blue-100 transition-all active:scale-[0.98]"
                 >
-                  Submit Report
+                  Submit Daily Report
                 </button>
               </div>
             ) : (
               <div className="bg-white p-8 rounded-[40px] shadow-2xl border border-slate-100 text-center space-y-8">
                 <div className="p-12 border-4 border-dashed border-slate-100 rounded-[32px] bg-slate-50 flex flex-col items-center gap-6">
                   <Upload size={48} className="text-blue-500" />
-                  <p className="text-sm text-slate-400 font-medium px-8">Upload CSV with headers: <b>Date, Block Name, HH Covered, HH Giving, HH Segregating</b></p>
+                  <p className="text-sm text-slate-400 font-medium px-8 italic">CSV Header Format: Date, Block Name, HH Covered, HH Giving, HH Segregating</p>
                   <input type="file" accept=".csv" onChange={handleBulkUpload} ref={fileInputRef} className="hidden" id="csv-upload-main" />
-                  <label htmlFor="csv-upload-main" className="px-10 py-4 bg-blue-600 text-white rounded-2xl font-black cursor-pointer hover:bg-blue-700 shadow-lg shadow-blue-100 transition">Choose CSV File</label>
+                  <label htmlFor="csv-upload-main" className="px-10 py-4 bg-blue-600 text-white rounded-2xl font-black cursor-pointer hover:bg-blue-700 transition shadow-lg">Upload Data File</label>
                 </div>
               </div>
             )}
           </div>
         )}
 
-        {/* SETUP VIEW */}
+        {/* SETUP TAB */}
         {activeTab === 'setup' && (
           <div className="max-w-4xl mx-auto py-6 space-y-8">
             <header className="space-y-2">
-              <h1 className="text-3xl font-black text-slate-800">Hierarchy & Project Setup</h1>
-              <p className="text-slate-500 font-medium">Configure team structure and geography mapping</p>
+              <h1 className="text-3xl font-black text-slate-800">Project Configuration</h1>
+              <p className="text-slate-500 font-medium">Define geography and team assignments</p>
             </header>
 
-            {/* Team Members */}
+            {/* Team */}
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
               <div className="flex items-center justify-between mb-8">
-                <h3 className="text-xl font-black flex items-center gap-3">Field Supervisors</h3>
-                <button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold hover:bg-blue-700 transition">Add Member</button>
+                <h3 className="text-xl font-black flex items-center gap-3"><UserCheck className="text-blue-500"/> Team Supervisors</h3>
+                <button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Lead</button>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {config.supervisors.map((fs, idx) => (
-                  <div key={fs.id} className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100 group">
-                    <input 
-                      placeholder="Name" 
-                      className="flex-1 bg-transparent border-none outline-none font-bold text-slate-700"
-                      value={fs.name}
-                      onChange={(e) => {
-                        const newSupers = [...config.supervisors];
-                        newSupers[idx].name = e.target.value;
-                        setConfig({...config, supervisors: newSupers});
-                      }}
-                    />
-                    <button onClick={() => setConfig({...config, supervisors: config.supervisors.filter(s => s.id !== fs.id)})} className="text-red-300 hover:text-red-500"><Trash2 size={18}/></button>
+                  <div key={fs.id} className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                    <input placeholder="Name" className="flex-1 bg-transparent border-none outline-none font-bold" value={fs.name} onChange={(e) => {
+                      const newSupers = [...config.supervisors];
+                      newSupers[idx].name = e.target.value;
+                      setConfig({...config, supervisors: newSupers});
+                    }} />
+                    <button onClick={() => setConfig({...config, supervisors: config.supervisors.filter(s => s.id !== fs.id)})} className="text-red-400 hover:text-red-500"><Trash2 size={18}/></button>
                   </div>
                 ))}
               </div>
             </section>
 
-            {/* Geography (States & Wards) */}
+            {/* Geography */}
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
               <div className="flex items-center justify-between mb-8">
-                <h3 className="text-xl font-black flex items-center gap-3">Geography Units</h3>
+                <h3 className="text-xl font-black flex items-center gap-3"><Globe className="text-blue-500"/> Geo Hierarchy</h3>
                 <button onClick={() => setConfig({...config, states: [...config.states, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add State</button>
               </div>
               <div className="space-y-6">
                 {config.states.map((st, sIdx) => (
                   <div key={st.id} className="border border-slate-100 rounded-[24px] overflow-hidden">
                     <div className="bg-slate-50 p-4 flex items-center gap-4">
-                      <input className="flex-1 bg-transparent font-black text-blue-600 outline-none text-lg" placeholder="State Name" value={st.name} onChange={(e) => {
+                      <input className="flex-1 bg-transparent font-black text-blue-600 outline-none" placeholder="State Name" value={st.name} onChange={(e) => {
                         const newStates = [...config.states];
                         newStates[sIdx].name = e.target.value;
                         setConfig({...config, states: newStates});
                       }} />
                       <button onClick={() => setConfig({...config, wards: [...config.wards, { id: Date.now().toString(), stateId: st.id, name: '' }]})} className="text-[10px] bg-white border border-slate-200 px-3 py-1.5 rounded-lg font-bold">+ Ward</button>
-                      <button onClick={() => setConfig({...config, states: config.states.filter(s => s.id !== st.id)})} className="text-red-300 hover:text-red-500 transition"><Trash2 size={16}/></button>
+                      <button onClick={() => setConfig({...config, states: config.states.filter(s => s.id !== st.id)})} className="text-red-400"><Trash2 size={16}/></button>
                     </div>
                     <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-2">
                       {config.wards.filter(w => w.stateId === st.id).map((wd) => (
@@ -682,7 +679,7 @@ const App = () => {
                             newWards[idx].name = e.target.value;
                             setConfig({...config, wards: newWards});
                           }} />
-                          <button onClick={() => setConfig({...config, wards: config.wards.filter(w => w.id !== wd.id)})} className="text-red-300 hover:text-red-500">&times;</button>
+                          <button onClick={() => setConfig({...config, wards: config.wards.filter(w => w.id !== wd.id)})} className="text-red-400">&times;</button>
                         </div>
                       ))}
                     </div>
@@ -691,10 +688,10 @@ const App = () => {
               </div>
             </section>
 
-            {/* Operational Units (Blocks) */}
+            {/* Blocks */}
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
               <div className="flex items-center justify-between mb-8">
-                <h3 className="text-xl font-black flex items-center gap-3">Blocks & Assignments</h3>
+                <h3 className="text-xl font-black flex items-center gap-3"><Database className="text-blue-500"/> Block Units</h3>
                 <button onClick={() => setConfig({...config, blocks: [...config.blocks, { id: Date.now().toString(), name: '', wardId: '', supervisorId: '', totalHH: 0 }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Block</button>
               </div>
               <div className="space-y-4">
@@ -712,7 +709,7 @@ const App = () => {
                           newBlocks[bIdx].wardId = e.target.value;
                           setConfig({...config, blocks: newBlocks});
                         }}>
-                          <option value="">Assign Ward</option>
+                          <option value="">Ward</option>
                           {config.wards.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
                         </select>
                         <select className="bg-white border border-slate-200 rounded-lg p-2 text-[10px] font-bold outline-none" value={bl.supervisorId} onChange={(e) => {
@@ -720,13 +717,13 @@ const App = () => {
                           newBlocks[bIdx].supervisorId = e.target.value;
                           setConfig({...config, blocks: newBlocks});
                         }}>
-                          <option value="">Assign Lead</option>
+                          <option value="">Lead</option>
                           {config.supervisors.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                         </select>
                       </div>
                     </div>
-                    <div className="w-24">
-                      <label className="text-[10px] font-black text-slate-400 uppercase block mb-1">Total HH</label>
+                    <div className="w-24 text-center">
+                      <label className="text-[10px] font-black text-slate-400 uppercase">Total HH</label>
                       <input type="number" className="w-full bg-white border border-slate-200 rounded-lg p-2 text-center font-black" value={bl.totalHH} onChange={(e) => {
                         const newBlocks = [...config.blocks];
                         newBlocks[bIdx].totalHH = Number(e.target.value);
@@ -739,7 +736,7 @@ const App = () => {
               </div>
             </section>
 
-            <button onClick={() => saveConfig(config)} className="w-full py-6 bg-gradient-to-r from-green-600 to-green-700 text-white rounded-[32px] font-black text-xl shadow-2xl">Publish Hierarchy</button>
+            <button onClick={() => saveConfig(config)} className="w-full py-6 bg-gradient-to-r from-green-600 to-green-700 text-white rounded-[32px] font-black text-xl shadow-2xl transition hover:scale-[1.01]">Publish Global Configuration</button>
           </div>
         )}
 
