@@ -1,5 +1,5 @@
-import ReactDOM from 'react-dom/client';
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import ReactDOM from 'react-dom/client';
 import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
@@ -45,7 +45,7 @@ import {
 
 /**
  * --- Firebase Configuration ---
- * Integrated with project: admob-app-id-4497163742
+ * Project: admob-app-id-4497163742
  */
 const isCanvas = typeof __firebase_config !== 'undefined';
 
@@ -98,7 +98,6 @@ const App = () => {
   const [viewTimeframe, setViewTimeframe] = useState('daily');
 
   // Entry Form State
-  const [entryMode, setEntryMode] = useState('single');
   const [entryState, setEntryState] = useState('');
   const [entryWard, setEntryWard] = useState('');
   const [entryBlock, setEntryBlock] = useState('');
@@ -106,10 +105,12 @@ const App = () => {
     date: formatDate(new Date()),
     hhCovered: 0,
     hhGiving: 0,
-    hhSegregating: 0
+    hhSegregating: 0,
+    noCollection: false,
+    reason: 'Vehicle didn\'t come'
   });
 
-  // Authentication
+  // Auth Initialization
   useEffect(() => {
     const initAuth = async () => {
       try {
@@ -127,7 +128,7 @@ const App = () => {
     return () => unsubscribe();
   }, []);
 
-  // Database Synchronization
+  // Sync with Firestore
   useEffect(() => {
     if (!user) return;
 
@@ -144,7 +145,7 @@ const App = () => {
       }
       setLoading(false);
     }, (err) => {
-      console.error("Config Error:", err);
+      console.error("Config Sync Error:", err);
       setLoading(false);
     });
 
@@ -153,7 +154,7 @@ const App = () => {
       const logs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setDailyData(logs);
     }, (err) => {
-      console.error("Data Error:", err);
+      console.error("Data Sync Error:", err);
     });
 
     return () => {
@@ -172,7 +173,7 @@ const App = () => {
     try {
       const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'app_config', 'settings');
       await setDoc(configRef, newConfig);
-      showStatus('success', 'Project configuration published to cloud!');
+      showStatus('success', 'Project configuration published successfully!');
     } catch (e) {
       showStatus('error', 'Failed to save configuration.');
     }
@@ -180,7 +181,6 @@ const App = () => {
 
   const removeSupervisor = (id) => {
     const newSupers = config.supervisors.filter(s => s.id !== id);
-    // Cleanup: Unassign this supervisor from any blocks they were managing
     const newBlocks = config.blocks.map(b => b.supervisorId === id ? { ...b, supervisorId: '' } : b);
     setConfig({ ...config, supervisors: newSupers, blocks: newBlocks });
     showStatus('success', 'Supervisor removed. Assigned blocks updated.');
@@ -189,7 +189,7 @@ const App = () => {
   const submitDailyLog = async () => {
     if (!user) return;
     if (!entryBlock) {
-      showStatus('error', "Please select a State, Ward, and Block.");
+      showStatus('error', "Please select State, Ward, and Block.");
       return;
     }
 
@@ -216,13 +216,20 @@ const App = () => {
       });
       
       showStatus('success', `Data saved for ${block.name}`);
-      setFormData({ ...formData, hhCovered: 0, hhGiving: 0, hhSegregating: 0 });
+      setFormData({ 
+        ...formData, 
+        hhCovered: 0, 
+        hhGiving: 0, 
+        hhSegregating: 0, 
+        noCollection: false, 
+        reason: 'Vehicle didn\'t come' 
+      });
     } catch (e) {
-      showStatus('error', "Submission failed. Please check database connection.");
+      showStatus('error', "Submission failed. Please check rules.");
     }
   };
 
-  // Analytics Helpers
+  // Analytics Logic
   const filteredLogs = useMemo(() => {
     return dailyData.filter(log => {
       const stateMatch = dashState === 'all' || log.stateId === dashState;
@@ -246,8 +253,10 @@ const App = () => {
       }
 
       if (!groups[key]) groups[key] = { name: key, giving: 0, seg: 0, count: 0 };
-      groups[key].giving += Number(log.hhGiving || 0);
-      groups[key].seg += Number(log.hhSegregating || 0);
+      if (!log.noCollection) {
+        groups[key].giving += Number(log.hhGiving || 0);
+        groups[key].seg += Number(log.hhSegregating || 0);
+      }
       groups[key].count += 1;
     });
 
@@ -268,7 +277,7 @@ const App = () => {
         return stateMatch && wardMatch && supervisorMatch;
       })
       .map(block => {
-        const logs = filteredLogs.filter(d => d.blockId === block.id);
+        const logs = filteredLogs.filter(d => d.blockId === block.id && !d.noCollection);
         const totalGiving = logs.reduce((s, l) => s + Number(l.hhGiving || 0), 0);
         const totalSeg = logs.reduce((s, l) => s + Number(l.hhSegregating || 0), 0);
         const supervisor = config.supervisors.find(s => s.id === block.supervisorId);
@@ -289,7 +298,7 @@ const App = () => {
   if (loading) return (
     <div className="flex flex-col items-center justify-center h-screen bg-slate-50 gap-4">
       <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-      <p className="text-slate-500 font-medium text-sm animate-pulse">Initializing Data...</p>
+      <p className="text-slate-500 font-medium animate-pulse text-sm">Loading Tracker...</p>
     </div>
   );
 
@@ -304,7 +313,7 @@ const App = () => {
         </div>
       )}
 
-      {/* Mobile Navigation */}
+      {/* Navigation */}
       <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 flex justify-around p-2 z-50 md:sticky md:top-0 md:flex-col md:w-64 md:h-screen md:justify-start md:gap-2 md:p-6 shadow-sm">
         <div className="hidden md:flex p-2 font-black text-2xl text-blue-600 mb-8 items-center gap-3">
           <Globe size={32} /> <span>SWM India</span>
@@ -336,7 +345,7 @@ const App = () => {
             <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div>
                 <h1 className="text-3xl font-bold tracking-tight text-slate-800">Operational Dashboard</h1>
-                <p className="text-slate-500 font-medium">Monitoring {viewTimeframe} performance across Karnataka</p>
+                <p className="text-slate-500 font-medium">Performance monitoring across India</p>
               </div>
               <div className="flex bg-white border border-slate-200 rounded-xl p-1 shadow-sm">
                 {['daily', 'weekly', 'monthly'].map(t => (
@@ -345,7 +354,6 @@ const App = () => {
               </div>
             </header>
 
-            {/* Filter Panel */}
             <div className="bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 items-end">
                 <div className="space-y-1">
@@ -385,9 +393,9 @@ const App = () => {
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               {[
-                { label: 'HH Collected', value: filteredLogs.reduce((s,v) => s + Number(v.hhGiving), 0).toLocaleString(), icon: Database, color: 'text-blue-600', bg: 'bg-blue-50' },
-                { label: 'HH Segregating', value: filteredLogs.reduce((s,v) => s + Number(v.hhSegregating), 0).toLocaleString(), icon: TrendingUp, color: 'text-purple-600', bg: 'bg-purple-50' },
-                { label: 'Efficiency Rate', value: (filteredLogs.reduce((s,v) => s + Number(v.hhGiving), 0) > 0 ? ((filteredLogs.reduce((s,v) => s + Number(v.hhSegregating), 0) / filteredLogs.reduce((s,v) => s + Number(v.hhGiving), 0)) * 100).toFixed(1) : 0) + '%', icon: CheckCircle2, color: 'text-green-600', bg: 'bg-green-50' }
+                { label: 'HH Collected', value: filteredLogs.reduce((s,v) => s + (v.noCollection ? 0 : Number(v.hhGiving || 0)), 0).toLocaleString(), icon: Database, color: 'text-blue-600', bg: 'bg-blue-50' },
+                { label: 'HH Segregating', value: filteredLogs.reduce((s,v) => s + (v.noCollection ? 0 : Number(v.hhSegregating || 0)), 0).toLocaleString(), icon: TrendingUp, color: 'text-purple-600', bg: 'bg-purple-50' },
+                { label: 'Efficiency Rate', value: (filteredLogs.reduce((s,v) => s + (v.noCollection ? 0 : Number(v.hhGiving || 0)), 0) > 0 ? ((filteredLogs.reduce((s,v) => s + (v.noCollection ? 0 : Number(v.hhSegregating || 0)), 0) / filteredLogs.reduce((s,v) => s + (v.noCollection ? 0 : Number(v.hhGiving || 0)), 0)) * 100).toFixed(1) : 0) + '%', icon: CheckCircle2, color: 'text-green-600', bg: 'bg-green-50' }
               ].map((card, i) => (
                 <div key={i} className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                   <div className={`${card.bg} ${card.color} p-4 rounded-2xl`}><card.icon size={28}/></div>
@@ -419,12 +427,6 @@ const App = () => {
             <div className="bg-white rounded-[40px] shadow-sm border border-slate-100 overflow-hidden mb-12">
               <div className="p-8 border-b border-slate-50 flex items-center justify-between">
                 <h2 className="font-black text-slate-800 text-xl">Operating Unit Breakdown</h2>
-                <button onClick={() => {
-                  const csv = performanceTable.map(p => `${p.name},${p.ward},${p.supervisor},${p.giving},${p.seg},${p.rate}%`).join('\n');
-                  const blob = new Blob([`Block,Ward,Supervisor,Giving,Segregating,Rate\n${csv}`], { type: 'text/csv' });
-                  const url = window.URL.createObjectURL(blob);
-                  const a = document.createElement('a'); a.href = url; a.download = `SWM_Report.csv`; a.click();
-                }} className="bg-slate-100 text-slate-600 px-4 py-2 rounded-xl text-xs font-bold hover:bg-slate-200 transition flex items-center gap-2"><Download size={14}/> Export</button>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left">
@@ -451,7 +453,7 @@ const App = () => {
         {/* FIELD ENTRY TAB */}
         {activeTab === 'entry' && (
           <div className="max-w-xl mx-auto py-6 animate-in slide-in-from-bottom-6">
-            <header className="text-center mb-8"><h1 className="text-2xl font-black text-slate-800">Field Intake</h1></header>
+            <header className="text-center mb-8"><h1 className="text-2xl font-black text-slate-800">Field Data Entry</h1></header>
             <div className="bg-white p-8 rounded-[40px] shadow-2xl border border-slate-100 space-y-6">
               <div className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
@@ -471,22 +473,64 @@ const App = () => {
                   </div>
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 text-center block">Operating Unit</label>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 text-center block">Operating Unit (Block)</label>
                   <select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none" value={entryBlock} onChange={(e) => setEntryBlock(e.target.value)}>
                     <option value="">Select Block</option>
                     {config.blocks.filter(b => b.wardId === entryWard).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
                   </select>
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 text-center block">Date</label>
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1 text-center block">Collection Date</label>
                   <input type="date" className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none text-center" value={formData.date} onChange={(e) => setFormData({...formData, date: e.target.value})} />
                 </div>
               </div>
-              <div className="grid grid-cols-1 gap-4 pt-4 border-t border-slate-50">
-                {[{ label: 'Households Covered', key: 'hhCovered', bg: 'bg-slate-50', text: 'text-slate-600' }, { label: 'HH Giving Waste', key: 'hhGiving', bg: 'bg-blue-50', text: 'text-blue-700' }, { label: 'HH Segregating', key: 'hhSegregating', bg: 'bg-purple-50', text: 'text-purple-700' }].map(f => (
-                  <div key={f.key} className={`${f.bg} p-5 rounded-3xl flex items-center justify-between border border-white/50 shadow-inner`}><span className={`${f.text} font-bold text-sm`}>{f.label}</span><input type="number" className="w-24 text-right bg-transparent border-none outline-none font-black text-2xl text-slate-800" value={formData[f.key]} onChange={(e) => setFormData({...formData, [f.key]: Number(e.target.value)})} /></div>
-                ))}
+
+              {/* Special Toggle for No Collection */}
+              <div className="flex items-center gap-3 p-5 bg-red-50 rounded-3xl border border-red-100">
+                <input 
+                  type="checkbox" 
+                  id="noCollection" 
+                  className="w-6 h-6 rounded-lg text-red-600 border-red-200 focus:ring-red-500" 
+                  checked={formData.noCollection} 
+                  onChange={(e) => setFormData({...formData, noCollection: e.target.checked})}
+                />
+                <label htmlFor="noCollection" className="text-red-700 font-bold text-sm select-none">No collection data today</label>
               </div>
+
+              {formData.noCollection ? (
+                <div className="space-y-1 animate-in slide-in-from-top-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Reason for Absence</label>
+                  <select 
+                    className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-white font-bold outline-none" 
+                    value={formData.reason} 
+                    onChange={(e) => setFormData({...formData, reason: e.target.value})}
+                  >
+                    <option value="Vehicle didn't come">1) Vehicle didn't come</option>
+                    <option value="Vehicle breakdown">2) Vehicle breakdown</option>
+                    <option value="Collection staff not available">3) Collection staff not available</option>
+                    <option value="Field supervisor absent">4) Field supervisor absent</option>
+                  </select>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-4 pt-4 border-t border-slate-50 animate-in fade-in">
+                  {[
+                    { label: 'Households Covered', key: 'hhCovered', bg: 'bg-slate-50', text: 'text-slate-600' }, 
+                    { label: 'HH Giving Waste', key: 'hhGiving', bg: 'bg-blue-50', text: 'text-blue-700' }, 
+                    { label: 'HH Segregating', key: 'hhSegregating', bg: 'bg-purple-50', text: 'text-purple-700' }
+                  ].map(f => (
+                    <div key={f.key} className={`${f.bg} p-5 rounded-3xl flex items-center justify-between border border-white/50 shadow-inner`}>
+                      <span className={`${f.text} font-bold text-sm`}>{f.label}</span>
+                      <input 
+                        type="number" 
+                        className="w-24 text-right bg-transparent border-none outline-none font-black text-2xl text-slate-800" 
+                        value={formData[f.key]} 
+                        onChange={(e) => setFormData({...formData, [f.key]: Number(e.target.value)})} 
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+
               <button onClick={submitDailyLog} className="w-full bg-blue-600 text-white py-5 rounded-[24px] font-black text-lg shadow-xl active:scale-[0.98] transition-all">Submit Report</button>
             </div>
           </div>
@@ -495,48 +539,43 @@ const App = () => {
         {/* SETUP TAB */}
         {activeTab === 'setup' && (
           <div className="max-w-4xl mx-auto py-6 space-y-8 animate-in slide-in-from-bottom-6">
-            <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800">Project Config</h1><p className="text-slate-500 font-medium text-sm">Update hierarchy and manage team leads</p></header>
+            <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800">Project Config</h1></header>
 
-            {/* TEAM MANAGEMENT */}
+            {/* TEAM */}
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><UserCheck className="text-blue-500"/> Team Supervisors</h3><button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add New Lead</button></div>
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><UserCheck className="text-blue-500"/> Team Supervisors</h3><button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Lead</button></div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {config.supervisors.map((fs, idx) => (
                   <div key={fs.id} className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100 transition focus-within:border-blue-300">
-                    <input placeholder="Enter Name" className="flex-1 bg-transparent border-none outline-none font-bold text-slate-700" value={fs.name} onChange={(e) => {
-                      const newSupers = [...config.supervisors];
-                      newSupers[idx].name = e.target.value;
-                      setConfig({...config, supervisors: newSupers});
+                    <input placeholder="Name" className="flex-1 bg-transparent border-none outline-none font-bold" value={fs.name} onChange={(e) => {
+                      const newSupers = [...config.supervisors]; newSupers[idx].name = e.target.value; setConfig({...config, supervisors: newSupers});
                     }} />
-                    <button onClick={() => removeSupervisor(fs.id)} className="text-red-400 hover:text-red-600 transition"><Trash2 size={18}/></button>
+                    <button onClick={() => removeSupervisor(fs.id)} className="text-red-400 hover:text-red-600"><Trash2 size={18}/></button>
                   </div>
                 ))}
               </div>
             </section>
 
-            {/* GEOGRAPHY MANAGEMENT */}
+            {/* GEOGRAPHY */}
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
               <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Globe className="text-blue-500" /> Geography</h3><button onClick={() => setConfig({...config, states: [...config.states, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add State</button></div>
               <div className="space-y-6">
                 {config.states.map((st, sIdx) => (
                   <div key={st.id} className="border border-slate-100 rounded-[24px] overflow-hidden">
                     <div className="bg-slate-50 p-4 flex items-center gap-4">
-                      <input className="flex-1 bg-transparent font-black text-blue-600 outline-none text-lg" placeholder="State Name" value={st.name} onChange={(e) => {
+                      <input className="flex-1 bg-transparent font-black text-blue-600 outline-none text-lg" placeholder="State" value={st.name} onChange={(e) => {
                         const newStates = [...config.states]; newStates[sIdx].name = e.target.value; setConfig({...config, states: newStates});
                       }} />
-                      <button onClick={() => setConfig({...config, wards: [...config.wards, { id: Date.now().toString(), stateId: st.id, name: '' }]})} className="text-[10px] bg-white border border-slate-200 px-3 py-1.5 rounded-lg font-bold">+ Add Ward</button>
-                      <button onClick={() => setConfig({...config, states: config.states.filter(s => s.id !== st.id)})} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button>
+                      <button onClick={() => setConfig({...config, wards: [...config.wards, { id: Date.now().toString(), stateId: st.id, name: '' }]})} className="text-[10px] bg-white border border-slate-200 px-3 py-1.5 rounded-lg font-bold">+ Ward</button>
+                      <button onClick={() => setConfig({...config, states: config.states.filter(s => s.id !== st.id)})} className="text-red-400"><Trash2 size={16}/></button>
                     </div>
                     <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-2">
                       {config.wards.filter(w => w.stateId === st.id).map((wd) => (
                         <div key={wd.id} className="flex items-center gap-2 bg-white border border-slate-100 p-2 rounded-xl">
-                          <input className="flex-1 text-sm font-bold outline-none" placeholder="Ward Name" value={wd.name} onChange={(e) => {
-                            const newWards = [...config.wards];
-                            const idx = config.wards.findIndex(w => w.id === wd.id);
-                            newWards[idx].name = e.target.value;
-                            setConfig({...config, wards: newWards});
+                          <input className="flex-1 text-sm font-bold outline-none" placeholder="Ward" value={wd.name} onChange={(e) => {
+                            const newWards = [...config.wards]; const idx = config.wards.findIndex(w => w.id === wd.id); newWards[idx].name = e.target.value; setConfig({...config, wards: newWards});
                           }} />
-                          <button onClick={() => setConfig({...config, wards: config.wards.filter(w => w.id !== wd.id)})} className="text-red-400 px-2 font-bold">&times;</button>
+                          <button onClick={() => setConfig({...config, wards: config.wards.filter(w => w.id !== wd.id)})} className="text-red-400">&times;</button>
                         </div>
                       ))}
                     </div>
@@ -545,41 +584,35 @@ const App = () => {
               </div>
             </section>
 
-            {/* BLOCK MANAGEMENT */}
+            {/* BLOCKS */}
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Database className="text-blue-500" /> Operational Units</h3><button onClick={() => setConfig({...config, blocks: [...config.blocks, { id: Date.now().toString(), name: '', wardId: '', supervisorId: '', totalHH: 0 }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Block</button></div>
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Database className="text-blue-500" /> Operational Blocks</h3><button onClick={() => setConfig({...config, blocks: [...config.blocks, { id: Date.now().toString(), name: '', wardId: '', supervisorId: '', totalHH: 0 }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Block</button></div>
               <div className="space-y-4">
                 {config.blocks.map((bl, bIdx) => (
-                  <div key={bl.id} className="flex flex-col md:flex-row gap-4 bg-slate-50 p-5 rounded-[24px] border border-slate-100 relative group transition-all hover:bg-slate-100/50">
-                    <div className="flex-1 space-y-2">
-                      <input className="w-full bg-transparent font-black text-slate-800 outline-none text-lg border-b-2 border-slate-200 focus:border-blue-500 transition" placeholder="Block Name" value={bl.name} onChange={(e) => {
+                  <div key={bl.id} className="bg-slate-50 p-5 rounded-[24px] border border-slate-100 space-y-4">
+                    <div className="flex items-center gap-4">
+                      <input className="flex-1 bg-transparent font-black text-slate-800 outline-none text-lg border-b-2 border-slate-200" placeholder="Block Name" value={bl.name} onChange={(e) => {
                         const newBlocks = [...config.blocks]; newBlocks[bIdx].name = e.target.value; setConfig({...config, blocks: newBlocks});
                       }} />
-                      <div className="grid grid-cols-2 gap-2">
-                        <select className="bg-white border border-slate-200 rounded-lg p-2 text-[10px] font-bold outline-none" value={bl.wardId} onChange={(e) => {
-                          const newBlocks = [...config.blocks]; newBlocks[bIdx].wardId = e.target.value; setConfig({...config, blocks: newBlocks});
-                        }}>
-                          <option value="">Select Ward</option>
-                          {config.wards.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
-                        </select>
-                        <select className="bg-white border border-slate-200 rounded-lg p-2 text-[10px] font-bold outline-none" value={bl.supervisorId} onChange={(e) => {
-                          const newBlocks = [...config.blocks]; newBlocks[bIdx].supervisorId = e.target.value; setConfig({...config, blocks: newBlocks});
-                        }}>
-                          <option value="">Select Lead</option>
-                          {config.supervisors.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                        </select>
-                      </div>
+                      <button onClick={() => setConfig({...config, blocks: config.blocks.filter(b => b.id !== bl.id)})} className="text-red-400"><Trash2 size={16}/></button>
                     </div>
-                    <div className="w-24 text-center"><label className="text-[10px] font-black text-slate-400 uppercase">Total HH</label><input type="number" className="w-full bg-white border border-slate-200 rounded-lg p-2 text-center font-black" value={bl.totalHH} onChange={(e) => {
-                      const newBlocks = [...config.blocks]; newBlocks[bIdx].totalHH = Number(e.target.value); setConfig({...config, blocks: newBlocks});
-                    }} /></div>
-                    <button onClick={() => setConfig({...config, blocks: config.blocks.filter(b => b.id !== bl.id)})} className="text-red-400 hover:text-red-600 transition p-2"><Trash2 size={16}/></button>
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                      <select className="bg-white border border-slate-200 rounded-lg p-2 text-xs font-bold" value={bl.wardId} onChange={(e) => {
+                        const newBlocks = [...config.blocks]; newBlocks[bIdx].wardId = e.target.value; setConfig({...config, blocks: newBlocks});
+                      }}><option value="">Select Ward</option>{config.wards.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select>
+                      <select className="bg-white border border-slate-200 rounded-lg p-2 text-xs font-bold" value={bl.supervisorId} onChange={(e) => {
+                        const newBlocks = [...config.blocks]; newBlocks[bIdx].supervisorId = e.target.value; setConfig({...config, blocks: newBlocks});
+                      }}><option value="">Assign Lead</option>{config.supervisors.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select>
+                      <div className="flex items-center gap-2"><label className="text-[10px] font-black text-slate-400 uppercase">Total HH</label><input type="number" className="w-full bg-white border border-slate-200 rounded-lg p-2 font-black text-xs" value={bl.totalHH} onChange={(e) => {
+                        const newBlocks = [...config.blocks]; newBlocks[bIdx].totalHH = Number(e.target.value); setConfig({...config, blocks: newBlocks});
+                      }} /></div>
+                    </div>
                   </div>
                 ))}
               </div>
             </section>
 
-            <button onClick={() => saveConfig(config)} className="w-full py-6 bg-gradient-to-r from-green-600 to-green-700 text-white rounded-[32px] font-black text-xl shadow-2xl transition hover:scale-[1.01] active:scale-[0.99]">Publish All Changes</button>
+            <button onClick={() => saveConfig(config)} className="w-full py-6 bg-gradient-to-r from-green-600 to-green-700 text-white rounded-[32px] font-black text-xl shadow-2xl">Publish All Configuration</button>
           </div>
         )}
       </main>
@@ -587,6 +620,13 @@ const App = () => {
   );
 };
 
+// Start app for Vercel deployment
+if (!isCanvas) {
+  const container = document.getElementById('root');
+  if (container) {
+    const root = ReactDOM.createRoot(container);
+    root.render(<App />);
+  }
+}
+
 export default App;
-const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(<App />);
