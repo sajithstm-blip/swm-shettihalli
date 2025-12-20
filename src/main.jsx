@@ -46,7 +46,8 @@ import {
   CheckSquare,
   Square,
   Activity,
-  Truck
+  Truck,
+  FileSpreadsheet
 } from 'lucide-react';
 
 /**
@@ -88,18 +89,21 @@ const App = () => {
   const [loading, setLoading] = useState(true);
   const [statusMsg, setStatusMsg] = useState({ type: '', text: '' });
   
-  // Dashboard Management Filters
+  // Dashboard UI Filters
   const [dashWard, setDashWard] = useState('all');
-  const [dashBlocks, setDashBlocks] = useState([]); // Multi-select array
+  const [dashBlocks, setDashBlocks] = useState([]); 
   const [dashSupervisor, setDashSupervisor] = useState('all');
-  
   const [dashStartDate, setDashStartDate] = useState(() => {
     const d = new Date();
-    d.setDate(d.getDate() - 7);
+    d.setDate(d.getDate() - 14);
     return formatDate(d);
   });
   const [dashEndDate, setDashEndDate] = useState(formatDate(new Date()));
   const [viewTimeframe, setViewTimeframe] = useState('daily');
+
+  // Dedicated Export Range
+  const [exportStart, setExportStart] = useState(dashStartDate);
+  const [exportEnd, setExportEnd] = useState(dashEndDate);
 
   // Entry Form State
   const [entryState, setEntryState] = useState('');
@@ -232,7 +236,7 @@ const App = () => {
     }
   };
 
-  // --- Executive Dashboard Logic ---
+  // --- Analytical Computations ---
   const filteredLogs = useMemo(() => {
     return dailyData.filter(log => {
       const wardMatch = dashWard === 'all' || log.wardId === dashWard;
@@ -243,7 +247,6 @@ const App = () => {
     });
   }, [dailyData, dashWard, dashBlocks, dashSupervisor, dashStartDate, dashEndDate]);
 
-  // Unique Time Series Fix: Sum by date first, then sort
   const timeSeriesData = useMemo(() => {
     const groups = {};
     filteredLogs.forEach(log => {
@@ -257,20 +260,19 @@ const App = () => {
       }
 
       if (!groups[key]) {
-        groups[key] = { name: key, covered: 0, giving: 0, seg: 0, rawDate: log.date };
+        groups[key] = { name: key, giving: 0, seg: 0, rawDate: log.date };
       }
       
-      groups[key].covered += Number(log.hhCovered || 0);
       if (!log.noCollection) {
         groups[key].giving += Number(log.hhGiving || 0);
         groups[key].seg += Number(log.hhSegregating || 0);
       }
     });
 
+    // Fix: Strict sorting prevents overlapping date labels on mouseover
     return Object.values(groups).sort((a, b) => a.rawDate.localeCompare(b.rawDate));
   }, [filteredLogs, viewTimeframe]);
 
-  // Breakdown of "Why collection is missing"
   const gapData = useMemo(() => {
     const reasons = {};
     filteredLogs.filter(l => l.noCollection).forEach(l => {
@@ -304,28 +306,83 @@ const App = () => {
       });
   }, [filteredLogs, config, dashWard, dashBlocks]);
 
-  // --- Advanced CSV Export ---
+  // --- Executive Report Export ---
   const handleExportCSV = () => {
-    const filename = `SWM_Executive_Report_${dashStartDate}.csv`;
-    const headers = ["Date", "Ward", "Block", "Supervisor", "HH Covered", "Giving Waste", "Segregating", "Status", "Reason"];
-    const rows = filteredLogs.map(l => [
-      l.date, l.wardName, l.blockName, l.supervisorName, l.hhCovered,
+    const exportLogs = dailyData.filter(l => l.date >= exportStart && l.date <= exportEnd);
+    if (exportLogs.length === 0) {
+      showStatus('error', 'No data found in the selected range.');
+      return;
+    }
+
+    const headers = ["Reporting Date", "Ward", "Block", "Supervisor", "HH Covered", "Giving Waste", "Segregating", "Status", "Reason"];
+    const logRows = exportLogs.sort((a,b) => a.date.localeCompare(b.date)).map(l => [
+      l.date, l.wardName || 'N/A', l.blockName || 'N/A', l.supervisorName || 'Unassigned', l.hhCovered,
       l.noCollection ? 0 : l.hhGiving, l.noCollection ? 0 : l.hhSegregating,
-      l.noCollection ? "Absent" : "Active", l.noCollection ? `"${l.reason}"` : ""
+      l.noCollection ? "Absent" : "Collected", l.noCollection ? `"${l.reason}"` : ""
     ]);
-    const csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
+
+    // Period Calculations Helper
+    const calculateStats = (data) => {
+      const cov = data.reduce((s,l) => s + Number(l.hhCovered || 0), 0);
+      const giv = data.reduce((s,l) => s + (l.noCollection ? 0 : Number(l.hhGiving || 0)), 0);
+      const seg = data.reduce((s,l) => s + (l.noCollection ? 0 : Number(l.hhSegregating || 0)), 0);
+      return {
+        givingPct: cov > 0 ? ((giv/cov)*100).toFixed(2) : "0.00",
+        segPct: giv > 0 ? ((seg/giv)*100).toFixed(2) : "0.00"
+      };
+    };
+
+    const getPeriod = (dateStr, type) => {
+      const d = new Date(dateStr);
+      if (type === 'W') return `Week Starting ${new Date(d.setDate(d.getDate() - d.getDay())).toISOString().split('T')[0]}`;
+      if (type === 'M') return `${d.toLocaleString('default', { month: 'long' })} ${d.getFullYear()}`;
+      if (type === 'Q') return `Q${Math.floor(d.getMonth() / 3) + 1} ${d.getFullYear()}`;
+      if (type === 'Y') return `${d.getFullYear()}`;
+    };
+
+    const aggregate = (type) => {
+      const periods = {};
+      exportLogs.forEach(l => {
+        const pk = getPeriod(l.date, type);
+        if (!periods[pk]) periods[pk] = [];
+        periods[pk].push(l);
+      });
+      return Object.entries(periods).map(([name, data]) => {
+        const s = calculateStats(data);
+        return [name, s.givingPct, s.segPct];
+      });
+    };
+
+    const summaryHeader = ["Summary Type", "Period Name", "Average Giving (%)", "Average Segregation (%)"];
+    const weeklySummary = aggregate('W').map(row => ["Weekly Average", ...row]);
+    const monthlySummary = aggregate('M').map(row => ["Monthly Average", ...row]);
+    const quarterlySummary = aggregate('Q').map(row => ["Quarterly Average", ...row]);
+    const yearlySummary = aggregate('Y').map(row => ["Yearly Average", ...row]);
+
+    const csvContent = [
+      headers,
+      ...logRows,
+      [],
+      ["MANAGEMENT SUMMARY ANALYSIS"],
+      summaryHeader,
+      ...weeklySummary,
+      ...monthlySummary,
+      ...quarterlySummary,
+      ...yearlySummary
+    ].map(e => e.join(",")).join("\n");
+
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.body.appendChild(document.createElement("a"));
-    link.href = url; link.download = filename; link.click();
-    document.body.removeChild(link);
-    showStatus('success', 'Detailed CSV exported.');
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `SWM_Report_${exportStart}_to_${exportEnd}.csv`;
+    link.click();
+    showStatus('success', 'Full management report generated.');
   };
 
   if (loading) return (
     <div className="flex flex-col items-center justify-center h-screen bg-slate-50 gap-4">
       <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-      <p className="text-slate-500 font-medium">Loading Executive Panel...</p>
+      <p className="text-slate-500 font-medium">Loading Management Panel...</p>
     </div>
   );
 
@@ -347,7 +404,7 @@ const App = () => {
         </div>
       )}
 
-      {/* Sidebar */}
+      {/* Sidebar Navigation */}
       <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 flex justify-around p-2 z-50 md:sticky md:top-0 md:flex-col md:w-64 md:h-screen md:justify-start md:gap-2 md:p-6 shadow-sm">
         <div className="hidden md:flex p-2 font-black text-2xl text-blue-600 mb-8 items-center gap-3">
           <Globe size={32} /> <span>SWM India</span>
@@ -374,28 +431,36 @@ const App = () => {
         {/* ANALYTICS TAB */}
         {activeTab === 'dashboard' && (
           <div className="space-y-6 animate-in fade-in duration-500">
-            <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            {/* Header with Integrated Export Controls */}
+            <header className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
               <div>
-                <h1 className="text-3xl font-bold tracking-tight text-slate-800">Executive Dashboard</h1>
-                <p className="text-slate-500 font-medium">Monitoring service footprint & staff accountability</p>
+                <h1 className="text-3xl font-bold tracking-tight text-slate-800">Management Control Center</h1>
+                <p className="text-slate-500 font-medium">Monitoring service footprint & team accountability</p>
               </div>
-              <div className="flex items-center gap-3">
-                <button onClick={handleExportCSV} className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-xl text-sm font-bold shadow-lg shadow-blue-100 hover:bg-blue-700 transition">
-                  <Download size={16}/> Management Export
-                </button>
-                <div className="flex bg-white border border-slate-200 rounded-xl p-1 shadow-sm">
-                  {['daily', 'weekly', 'monthly'].map(t => (
-                    <button key={t} onClick={() => setViewTimeframe(t)} className={`px-4 py-1.5 rounded-lg text-xs font-bold capitalize transition ${viewTimeframe === t ? 'bg-slate-100 text-blue-600' : 'text-slate-500'}`}>{t}</button>
-                  ))}
+              
+              <div className="bg-white p-4 rounded-[28px] border border-slate-200 shadow-sm flex flex-col sm:flex-row items-center gap-4">
+                <div className="flex items-center gap-2">
+                  <div className="flex flex-col">
+                    <label className="text-[9px] font-black text-slate-400 uppercase ml-1">Report Start</label>
+                    <input type="date" className="bg-slate-50 border-none rounded-lg p-1.5 text-[11px] font-bold outline-none" value={exportStart} onChange={e => setExportStart(e.target.value)} />
+                  </div>
+                  <ArrowRight size={14} className="text-slate-300 mt-3" />
+                  <div className="flex flex-col">
+                    <label className="text-[9px] font-black text-slate-400 uppercase ml-1">Report End</label>
+                    <input type="date" className="bg-slate-50 border-none rounded-lg p-1.5 text-[11px] font-bold outline-none" value={exportEnd} onChange={e => setExportEnd(e.target.value)} />
+                  </div>
                 </div>
+                <button onClick={handleExportCSV} className="w-full sm:w-auto flex items-center justify-center gap-2 bg-blue-600 text-white px-5 py-3 rounded-xl text-sm font-black shadow-lg shadow-blue-100 hover:bg-blue-700 transition active:scale-95">
+                  <FileSpreadsheet size={18}/> Report Export
+                </button>
               </div>
             </header>
 
-            {/* Filter Suite */}
+            {/* Dashboard Filters */}
             <div className="bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 items-start">
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Ward</label>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Ward Filter</label>
                   <select className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-sm outline-none font-semibold" value={dashWard} onChange={(e) => {setDashWard(e.target.value); setDashBlocks([]);}}>
                     <option value="all">All Wards</option>
                     {config.wards.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
@@ -404,7 +469,7 @@ const App = () => {
                 
                 <div className="space-y-1">
                   <label className="text-[10px] font-bold text-slate-400 uppercase ml-1 flex justify-between">
-                    <span>Block Selection (Multi)</span>
+                    <span>Block Intelligence (Multi)</span>
                     {dashBlocks.length > 0 && <button onClick={() => setDashBlocks([])} className="text-blue-500 text-[9px] hover:underline">Clear</button>}
                   </label>
                   <div className="max-h-32 overflow-y-auto bg-slate-50 border border-slate-200 rounded-xl p-2 space-y-1">
@@ -412,7 +477,7 @@ const App = () => {
                       <button 
                         key={block.id} 
                         onClick={() => toggleBlockFilter(block.id)}
-                        className={`flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-xs font-bold transition-all ${dashBlocks.includes(block.id) ? 'bg-blue-600 text-white' : 'hover:bg-slate-200 text-slate-600'}`}
+                        className={`flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-xs font-bold transition-all ${dashBlocks.includes(block.id) ? 'bg-blue-600 text-white shadow-sm' : 'hover:bg-slate-200 text-slate-600'}`}
                       >
                         {dashBlocks.includes(block.id) ? <CheckSquare size={14}/> : <Square size={14}/>}
                         <span className="truncate">{block.name}</span>
@@ -422,7 +487,7 @@ const App = () => {
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Supervisor</label>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Lead Responsible</label>
                   <select className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-sm outline-none font-semibold" value={dashSupervisor} onChange={(e) => setDashSupervisor(e.target.value)}>
                     <option value="all">All Supervisors</option>
                     {config.supervisors.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -430,54 +495,56 @@ const App = () => {
                 </div>
 
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1 text-center block">Analysis Period</label>
-                  <div className="flex items-center gap-2">
-                    <input type="date" className="flex-1 bg-blue-50 border border-blue-100 rounded-xl p-2 text-[10px] outline-none font-bold text-blue-700" value={dashStartDate} onChange={(e) => setDashStartDate(e.target.value)} />
-                    <input type="date" className="flex-1 bg-blue-50 border border-blue-100 rounded-xl p-2 text-[10px] outline-none font-bold text-blue-700" value={dashEndDate} onChange={(e) => setDashEndDate(e.target.value)} />
+                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1 text-center block">Visual Analysis Range</label>
+                  <div className="flex bg-slate-50 border border-slate-200 rounded-xl p-1 gap-1">
+                    {['daily', 'weekly', 'monthly'].map(t => (
+                      <button key={t} onClick={() => setViewTimeframe(t)} className={`flex-1 py-1.5 rounded-lg text-[10px] font-black capitalize transition ${viewTimeframe === t ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'}`}>{t}</button>
+                    ))}
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* Topline Metrics */}
+            {/* KPI Cards */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5">
                 <div className="bg-blue-50 text-blue-600 p-4 rounded-2xl"><Users size={28}/></div>
                 <div>
-                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Total HH Covered</p>
+                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Service Coverage</p>
                   <p className="text-2xl font-black text-slate-800 leading-tight">{stats.covered.toLocaleString()}</p>
+                  <p className="text-[9px] text-blue-400 font-bold mt-1">HH Area of Operation</p>
                 </div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5">
                 <div className="bg-indigo-50 text-indigo-600 p-4 rounded-2xl"><Truck size={28}/></div>
                 <div>
-                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Participation Rate</p>
+                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Active Intake</p>
                   <p className="text-2xl font-black text-slate-800 leading-tight">{(stats.covered > 0 ? (stats.giving/stats.covered*100).toFixed(1) : 0)}%</p>
-                  <p className="text-[10px] text-indigo-400 font-bold">{stats.giving.toLocaleString()} Giving Waste</p>
+                  <p className="text-[9px] text-indigo-400 font-bold mt-1">{stats.giving.toLocaleString()} Participating HH</p>
                 </div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5">
                 <div className="bg-green-50 text-green-600 p-4 rounded-2xl"><CheckCircle2 size={28}/></div>
                 <div>
-                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Segregation Efficiency</p>
+                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Segregation Rate</p>
                   <p className="text-2xl font-black text-slate-800 leading-tight">{(stats.giving > 0 ? ((stats.seg / stats.giving) * 100).toFixed(1) : 0)}%</p>
-                  <p className="text-[10px] text-green-400 font-bold">{stats.seg.toLocaleString()} HH Segregating</p>
+                  <p className="text-[9px] text-green-400 font-bold mt-1">{stats.seg.toLocaleString()} Quality Stream</p>
                 </div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5">
                 <div className="bg-red-50 text-red-600 p-4 rounded-2xl"><Ban size={28}/></div>
                 <div>
-                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Absence Incidents</p>
+                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Service Gaps</p>
                   <p className="text-2xl font-black text-slate-800 leading-tight">{stats.absences}</p>
-                  <p className="text-[10px] text-red-400 font-bold">Collection Gaps</p>
+                  <p className="text-[9px] text-red-400 font-bold mt-1">Non-collection events</p>
                 </div>
               </div>
             </div>
 
-            {/* Visual Analytics */}
+            {/* Visual Charts */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2 bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
-                <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8"><History className="text-blue-500" size={20}/> Coverage & Efficiency Trend</h3>
+                <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8"><History className="text-blue-500" size={20}/> Coverage & Efficiency Trends</h3>
                 <div className="h-80">
                   <ResponsiveContainer width="100%" height="100%">
                     <AreaChart data={timeSeriesData}>
@@ -493,22 +560,22 @@ const App = () => {
                         labelStyle={{ fontSize: '14px', fontWeight: '900', color: '#1e293b' }}
                       />
                       <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} />
-                      <Area type="monotone" dataKey="giving" name="HH Giving Waste" stroke="#3b82f6" strokeWidth={4} fillOpacity={1} fill="url(#colorGiving)" />
-                      <Area type="monotone" dataKey="seg" name="HH Segregating" stroke="#a855f7" strokeWidth={4} fillOpacity={1} fill="url(#colorSeg)" />
+                      <Area type="monotone" dataKey="giving" name="HH Collection" stroke="#3b82f6" strokeWidth={4} fillOpacity={1} fill="url(#colorGiving)" />
+                      <Area type="monotone" dataKey="seg" name="HH Segregation" stroke="#a855f7" strokeWidth={4} fillOpacity={1} fill="url(#colorSeg)" />
                     </AreaChart>
                   </ResponsiveContainer>
                 </div>
               </div>
               
               <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
-                <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8"><Ban className="text-red-500" size={20}/> Reason for Absence</h3>
+                <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8"><Ban className="text-red-500" size={20}/> Failure Mode Analysis</h3>
                 {gapData.length > 0 ? (
                   <div className="h-80">
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart data={gapData} layout="vertical">
                         <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f1f5f9" />
                         <XAxis type="number" hide />
-                        <YAxis dataKey="name" type="category" axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#64748b', fontWeight: 'bold'}} width={100} />
+                        <YAxis dataKey="name" type="category" axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#64748b', fontWeight: 'bold'}} width={120} />
                         <Tooltip cursor={{fill: '#f8fafc'}} contentStyle={{ borderRadius: '15px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} />
                         <Bar dataKey="value" name="Incidents" radius={[0, 10, 10, 0]}>
                           {gapData.map((_, index) => <Cell key={index} fill={['#ef4444', '#f97316', '#f59e0b', '#84cc16'][index % 4]} />)}
@@ -519,30 +586,32 @@ const App = () => {
                 ) : (
                   <div className="h-full flex flex-col items-center justify-center text-center p-10 gap-3 opacity-30">
                     <CheckCircle2 size={64} className="text-green-500"/>
-                    <p className="font-bold text-sm">Perfect Attendance! <br/> No gaps reported in this range.</p>
+                    <p className="font-bold text-sm">Perfect Uptime! <br/> No gaps reported.</p>
                   </div>
                 )}
               </div>
             </div>
 
+            {/* Detailed Performance Table */}
             <div className="bg-white rounded-[40px] shadow-sm border border-slate-100 overflow-hidden mb-12">
-              <div className="p-8 border-b border-slate-50 flex items-center justify-between">
-                <h2 className="font-black text-slate-800 text-xl">Operating Unit Performance</h2>
+              <div className="p-8 border-b border-slate-50">
+                <h2 className="font-black text-slate-800 text-xl">Operational Unit Performance</h2>
+                <p className="text-slate-400 text-xs mt-1">Tracking supervisor effectiveness across blocks</p>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left">
                   <thead className="bg-slate-50 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                    <tr><th className="px-8 py-5">Block</th><th className="px-6 py-5">Supervisor</th><th className="px-6 py-5 text-center">HH Covered</th><th className="px-6 py-5 text-center">Giving</th><th className="px-8 py-5">Segregation Efficiency</th><th className="px-6 py-5">Gaps</th></tr>
+                    <tr><th className="px-8 py-5">Block</th><th className="px-6 py-5">Responsible Lead</th><th className="px-6 py-5 text-center">HH Area</th><th className="px-6 py-5 text-center">Giving</th><th className="px-8 py-5">Segregation Efficiency</th><th className="px-6 py-5">Reliability</th></tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
                     {performanceTable.map((block, i) => (
                       <tr key={i} className="hover:bg-blue-50/20 transition group">
-                        <td className="px-8 py-5"><div className="font-black text-slate-700">{block.name}</div><div className="text-[10px] text-slate-400 font-bold mt-0.5">{block.ward}</div></td>
+                        <td className="px-8 py-5"><div className="font-black text-slate-700">{block.name}</div></td>
                         <td className="px-6 py-5 font-bold text-slate-500 text-sm">{block.supervisor}</td>
                         <td className="px-6 py-5 font-black text-slate-700 text-center">{block.covered}</td>
                         <td className="px-6 py-5 font-black text-blue-600 text-center">{block.giving}</td>
                         <td className="px-8 py-5"><div className="flex items-center gap-3"><div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden max-w-[100px]"><div className={`h-full rounded-full ${Number(block.rate) > 85 ? 'bg-green-500' : Number(block.rate) > 60 ? 'bg-amber-500' : 'bg-red-500'}`} style={{width: `${block.rate}%`}} /></div><span className="text-sm font-black text-slate-700">{block.rate}%</span></div></td>
-                        <td className="px-6 py-5">{block.absences > 0 ? <div className="text-red-500 text-[10px] font-bold">{block.absences} Incidents</div> : <span className="text-slate-300">—</span>}</td>
+                        <td className="px-6 py-5">{block.absences > 0 ? <div className="text-red-500 text-[10px] font-bold">{block.absences} Gaps</div> : <div className="text-green-600 text-[10px] font-bold">100% Active</div>}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -631,9 +700,9 @@ const App = () => {
         {/* SETUP TAB */}
         {activeTab === 'setup' && (
           <div className="max-w-4xl mx-auto py-6 space-y-8 animate-in slide-in-from-bottom-6">
-            <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800">Operational Hierarchy</h1></header>
+            <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800">Hierarchy Management</h1></header>
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><UserCheck className="text-blue-500"/> Team Supervisors</h3><button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Lead</button></div>
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><UserCheck className="text-blue-500"/> Field Supervisors</h3><button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Lead</button></div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {config.supervisors.map((fs, idx) => (
                   <div key={fs.id} className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100">
