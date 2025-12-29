@@ -47,7 +47,8 @@ import {
   Lock,
   UserPlus,
   Loader2,
-  LogIn
+  LogIn,
+  Info
 } from 'lucide-react';
 
 /**
@@ -122,7 +123,6 @@ const App = () => {
     const cleanEmail = emailInput.trim().toLowerCase();
     
     // --- MASTER ADMIN OVERRIDE ---
-    // New complex password applied here.
     if (cleanEmail === 'sajith.tm@saahas.org' && passInput === 'Swhm#9X$v2') {
         setUser({ email: cleanEmail, uid: 'master-admin-bypass' });
         setUserRole('manager');
@@ -408,6 +408,15 @@ const App = () => {
             {authMode === 'login' ? "New user? Register" : "Have an account? Log in"}
           </button>
         </div>
+        
+        {emailInput.toLowerCase() === 'sajith.tm@saahas.org' && authMode === 'register' && (
+            <div className="p-4 bg-amber-50 border border-amber-100 rounded-2xl flex items-center gap-3">
+                <Info className="text-amber-500 shrink-0" size={20}/>
+                <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest leading-relaxed text-left">
+                    Admin Bypass Active. Credentials verified against hardcoded system key.
+                </p>
+            </div>
+        )}
       </div>
     </div>
   );
