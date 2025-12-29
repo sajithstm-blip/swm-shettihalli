@@ -130,8 +130,8 @@ const App = () => {
 
     setAuthLoading(true);
     const actionCodeSettings = {
-      // Must exactly match the Vercel URL or the URL the user is on
-      url: window.location.origin + window.location.pathname,
+      // Must exactly match the Vercel URL
+      url: window.location.href,
       handleCodeInApp: true,
     };
 
@@ -234,7 +234,7 @@ const App = () => {
     return () => { unsubConfig(); unsubData(); };
   }, [user, userRole]);
 
-  // --- Helpers ---
+  // --- UI Helpers ---
   const showStatus = (type, text) => {
     setStatusMsg({ type, text: String(text) });
     if (type !== 'info') {
@@ -247,7 +247,7 @@ const App = () => {
     try {
       const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'app_config', 'settings');
       await setDoc(configRef, newConfig);
-      showStatus('success', 'Operational settings updated!');
+      showStatus('success', 'Project settings updated!');
     } catch (e) {
       showStatus('error', 'Failed to save.');
     }
@@ -373,7 +373,7 @@ const App = () => {
 
     const getPeriodKey = (dateStr, type) => {
       const d = new Date(dateStr);
-      if (type === 'W') return `Week ${new Date(d.setDate(d.getDate() - d.getDay())).toISOString().split('T')[0]}`;
+      if (type === 'W') return `Week Starting ${new Date(d.setDate(d.getDate() - d.getDay())).toISOString().split('T')[0]}`;
       if (type === 'M') return `${d.toLocaleString('default', { month: 'long' })} ${d.getFullYear()}`;
       if (type === 'Q') return `Q${Math.floor(d.getMonth() / 3) + 1} ${d.getFullYear()}`;
       if (type === 'Y') return `${d.getFullYear()}`;
@@ -392,13 +392,16 @@ const App = () => {
       });
     };
 
-    const summaryHeader = ["Summary Period", "Avg Giving %", "Avg Segregation %"];
+    const summaryHeader = ["Summary Period", "Avg Giving (%)", "Avg Segregation (%)"];
+    const summaries = [
+      ...aggregate('W').map(r => ["Weekly Average", ...r]),
+      ...aggregate('M').map(r => ["Monthly Average", ...r]),
+      ...aggregate('Q').map(r => ["Quarterly Average", ...r]),
+      ...aggregate('Y').map(r => ["Yearly Average", ...r])
+    ];
+
     const csvContent = [
-      headers, ...logRows, [], ["AVERAGE PERFORMANCE SUMMARY"], summaryHeader,
-      ...aggregate('W').map(r => ["Weekly", ...r]),
-      ...aggregate('M').map(r => ["Monthly", ...r]),
-      ...aggregate('Q').map(r => ["Quarterly", ...r]),
-      ...aggregate('Y').map(r => ["Yearly", ...r])
+      headers, ...logRows, [], ["AVERAGE PERFORMANCE SUMMARY"], summaryHeader, ...summaries
     ].map(e => e.join(",")).join("\n");
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -406,7 +409,7 @@ const App = () => {
     link.href = URL.createObjectURL(blob);
     link.download = `SWM_Report_${exportStart}_to_${exportEnd}.csv`;
     link.click();
-    showStatus('success', 'CSV Report Exported.');
+    showStatus('success', 'Report Downloaded.');
   };
 
   // --- Master View Switcher ---
@@ -515,11 +518,7 @@ const App = () => {
             <Settings size={20} /> <span className="text-[10px] md:text-base">Setup</span>
           </button>
         )}
-        <div className="mt-auto hidden md:block pt-6 border-t border-slate-100">
-          <div className="flex items-center gap-3 px-4 py-2 mb-4">
-            <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold text-xs">{user?.email?.[0].toUpperCase()}</div>
-            <div className="flex flex-col"><span className="text-xs font-black text-slate-700 truncate max-w-[120px]">{user?.email?.split('@')[0]}</span><span className="text-[9px] font-bold text-slate-400 uppercase">{userRole}</span></div>
-          </div>
+        <div className="mt-auto hidden md:block pt-6 border-t border-slate-100 text-center">
           <button onClick={handleLogout} className="w-full flex items-center gap-3 px-4 py-3 text-red-500 font-bold hover:bg-red-50 rounded-2xl transition"><LogOut size={18} /> Logout</button>
         </div>
       </nav>
@@ -562,7 +561,7 @@ const App = () => {
                   </div>
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Scale</label>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Timeframe</label>
                   <div className="flex bg-slate-50 border border-slate-200 rounded-xl p-1 gap-1">
                     {['daily', 'weekly', 'monthly'].map(t => (<button key={t} onClick={() => setViewTimeframe(t)} className={`flex-1 py-1.5 rounded-lg text-[10px] font-black capitalize transition ${viewTimeframe === t ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'}`}>{t}</button>))}
                   </div>
@@ -577,19 +576,19 @@ const App = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-blue-50 text-blue-600 p-4 rounded-2xl"><Users size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">HH Area</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.covered.toLocaleString()}</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">HH Area</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.covered.toLocaleString()}</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-indigo-50 text-indigo-600 p-4 rounded-2xl"><Truck size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">participation</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.covered > 0 ? (stats.giving/stats.covered*100).toFixed(1) : 0)}%</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Participation</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.covered > 0 ? (stats.giving/stats.covered*100).toFixed(1) : 0)}%</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-green-50 text-green-600 p-4 rounded-2xl"><CheckCircle2 size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Efficiency</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.giving > 0 ? ((stats.seg / stats.giving) * 100).toFixed(1) : 0)}%</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Efficiency</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.giving > 0 ? ((stats.seg / stats.giving) * 100).toFixed(1) : 0)}%</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-red-50 text-red-600 p-4 rounded-2xl"><Ban size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Absences</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.absences}</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Absences</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.absences}</p></div>
               </div>
             </div>
 
@@ -618,11 +617,11 @@ const App = () => {
                 </div>
               </div>
               <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
-                <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8"><Ban className="text-red-500" size={20}/> Failure Gaps</h3>
+                <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8"><Ban className="text-red-500" size={20}/> Failure Modes</h3>
                 {gapData.length > 0 ? (
                   <div className="h-80"><ResponsiveContainer width="100%" height="100%"><BarChart data={gapData} layout="vertical"><CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f1f5f9" /><XAxis type="number" hide /><YAxis dataKey="name" type="category" axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#64748b', fontWeight: 'bold'}} width={120} /><Tooltip cursor={{fill: '#f8fafc'}} contentStyle={{ borderRadius: '15px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} /><Bar dataKey="value" name="Incidents" radius={[0, 10, 10, 0]}>{gapData.map((_, index) => <Cell key={index} fill={['#ef4444', '#f97316', '#f59e0b', '#84cc16'][index % 4]} />)}</Bar></BarChart></ResponsiveContainer></div>
                 ) : (
-                  <div className="h-full flex flex-col items-center justify-center text-center opacity-30"><CheckCircle2 size={64} className="text-green-500"/><p className="font-bold text-sm mt-3">All Active!</p></div>
+                  <div className="h-full flex flex-col items-center justify-center text-center opacity-30"><CheckCircle2 size={64} className="text-green-500"/><p className="font-bold text-sm mt-3">All Operational!</p></div>
                 )}
               </div>
             </div>
@@ -640,7 +639,7 @@ const App = () => {
               <div className="overflow-x-auto">
                 <table className="w-full text-left">
                   <thead className="bg-slate-50 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                    <tr><th className="px-8 py-5">Date</th><th className="px-6 py-5">Block</th><th className="px-6 py-5">Status</th><th className="px-6 py-5 text-center">Covered</th><th className="px-6 py-5 text-center">Waste Given</th><th className="px-6 py-5 text-center">Waste Segregated</th><th className="px-6 py-5">Given %</th><th className="px-6 py-5">Segregated %</th></tr>
+                    <tr><th className="px-8 py-5">Date</th><th className="px-6 py-5">Block</th><th className="px-6 py-5">Status</th><th className="px-6 py-5 text-center">Covered</th><th className="px-6 py-5 text-center">Waste Given</th><th className="px-6 py-5 text-center">Waste Segregated</th><th className="px-6 py-5">Given Percentage</th><th className="px-6 py-5">Segregated Percentage</th></tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
                     {reviewTableData.map((l, i) => {
@@ -708,11 +707,12 @@ const App = () => {
           </div>
         )}
 
+        {/* SETUP */}
         {activeTab === 'setup' && (
           <div className="max-w-4xl mx-auto py-6 space-y-8 animate-in slide-in-from-bottom-6">
             <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800">Operational Hierarchy</h1></header>
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><ShieldCheck className="text-blue-500"/> Account Access Mapping</h3></div>
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><ShieldCheck className="text-blue-500"/> Team Access Mapping</h3></div>
               <div className="grid grid-cols-1 gap-4"><div className="flex flex-col sm:flex-row gap-2"><input id="new-user-email" placeholder="staff@saahas.org" className="flex-1 bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none" /><select id="new-user-role" className="bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none"><option value="supervisor">Supervisor</option><option value="coordinator">Coordinator</option><option value="manager">Manager</option></select><button onClick={() => { const em = document.getElementById('new-user-email').value; const rl = document.getElementById('new-user-role').value; if(em) updateUserRole(em, rl); }} className="bg-blue-600 text-white px-6 py-3 rounded-xl font-black">Authorize</button></div></div>
             </section>
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
