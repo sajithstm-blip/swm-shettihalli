@@ -89,7 +89,7 @@ const App = () => {
   const [loading, setLoading] = useState(true);
   const [statusMsg, setStatusMsg] = useState({ type: '', text: '' });
   
-  // Dashboard & Review Filters
+  // Filters
   const [dashWard, setDashWard] = useState('all');
   const [dashBlocks, setDashBlocks] = useState([]); 
   const [dashSupervisor, setDashSupervisor] = useState('all');
@@ -119,10 +119,8 @@ const App = () => {
   // --- Authentication Handlers ---
   const handleAuth = async (e) => {
     e.preventDefault();
-    
-    // Check for Firebase minimum password length
     if (passInput.length < 6) {
-        showStatus('error', 'Password must be at least 6 characters long.');
+        showStatus('error', 'Password must be at least 6 characters.');
         return;
     }
 
@@ -134,7 +132,17 @@ const App = () => {
         showStatus('success', 'Logged in.');
       } else {
         await createUserWithEmailAndPassword(auth, cleanEmail, passInput);
-        showStatus('success', 'Account created! Welcome.');
+        // Instant role assignment for Admin to prevent DB sync delay
+        if (cleanEmail === 'sajith.tm@saahas.org') {
+            setUserRole('manager');
+            try {
+              await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', cleanEmail), {
+                  role: 'manager',
+                  updatedAt: new Date().toISOString()
+              });
+            } catch (e) { console.warn("Admin bootstrap background sync delayed."); }
+        }
+        showStatus('success', 'Registration complete!');
       }
     } catch (error) {
       console.error(error);
@@ -142,7 +150,6 @@ const App = () => {
       if (error.code === 'auth/user-not-found') msg = 'Account not found. Click "Create account" below.';
       if (error.code === 'auth/wrong-password') msg = 'Incorrect password.';
       if (error.code === 'auth/email-already-in-use') msg = 'This email is already registered. Please log in.';
-      if (error.code === 'auth/weak-password') msg = 'Password is too weak (min 6 characters).';
       showStatus('error', msg);
     } finally {
       setAuthLoading(false);
@@ -157,43 +164,46 @@ const App = () => {
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
-      try {
-        if (u) {
-          setUser(u);
-          const email = u.email.toLowerCase();
-          
-          // --- ADMIN BYPASS: Instant access for the specified ID ---
-          if (email === 'sajith.tm@saahas.org') {
+      if (u) {
+        setUser(u);
+        const email = u.email.toLowerCase();
+        
+        // --- BOOTSTRAP BYPASS: sajith.tm@saahas.org never hangs ---
+        if (email === 'sajith.tm@saahas.org') {
              setUserRole('manager');
              setRoleLoading(false);
-          } else {
-             setRoleLoading(true);
-             const roleRef = doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', email);
-             const roleSnap = await getDoc(roleRef);
-             if (roleSnap.exists()) {
-               const role = roleSnap.data().role;
-               setUserRole(role);
-               if (role === 'supervisor') setActiveTab('entry');
-             } else {
-               setUserRole('unauthorized');
-             }
-             setRoleLoading(false);
-          }
+             setLoading(false);
         } else {
-          setUser(null);
-          setUserRole(null);
+             setRoleLoading(true);
+             try {
+               const roleRef = doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', email);
+               const roleSnap = await getDoc(roleRef);
+               if (roleSnap.exists()) {
+                 const role = roleSnap.data().role;
+                 setUserRole(role);
+                 if (role === 'supervisor') setActiveTab('entry');
+               } else {
+                 setUserRole('unauthorized');
+               }
+             } catch (err) {
+               console.error("Auth Listener Error:", err);
+               setUserRole('unauthorized');
+             } finally {
+               setRoleLoading(false);
+               setLoading(false);
+             }
         }
-      } catch (err) {
-        console.error("Auth Listener Error:", err);
-        setUserRole('unauthorized');
-      } finally {
+      } else {
+        setUser(null);
+        setUserRole(null);
+        setRoleLoading(false);
         setLoading(false);
       }
     });
     return () => unsubscribe();
   }, []);
 
-  // --- Data Sync ---
+  // --- Real-time Data Sync ---
   useEffect(() => {
     if (!user || !userRole || userRole === 'unauthorized') return;
 
@@ -208,18 +218,18 @@ const App = () => {
           supervisors: data.supervisors || []
         });
       }
-    });
+    }, (err) => console.error("Config stream error:", err));
 
     const dataRef = collection(db, 'artifacts', appId, 'public', 'data', 'daily_logs');
     const unsubData = onSnapshot(query(dataRef), (snapshot) => {
       const logs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setDailyData(logs);
-    });
+    }, (err) => console.error("Data stream error:", err));
 
     return () => { unsubConfig(); unsubData(); };
   }, [user, userRole]);
 
-  // --- Logic Helpers ---
+  // --- UI and Logic Helpers ---
   const showStatus = (type, text) => {
     setStatusMsg({ type, text: String(text) });
     setTimeout(() => setStatusMsg({ type: '', text: '' }), 5000);
@@ -230,7 +240,7 @@ const App = () => {
     try {
       const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'app_config', 'settings');
       await setDoc(configRef, newConfig);
-      showStatus('success', 'Changes published to database.');
+      showStatus('success', 'Changes published.');
     } catch (e) {
       showStatus('error', 'Update failed.');
     }
@@ -241,9 +251,9 @@ const App = () => {
     try {
       const roleRef = doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', email.toLowerCase().trim());
       await setDoc(roleRef, { role, updatedAt: new Date().toISOString() });
-      showStatus('success', `Permission assigned to ${email}`);
+      showStatus('success', `Permission assigned: ${email} as ${role}`);
     } catch (e) {
-      showStatus('error', 'Update failed.');
+      showStatus('error', 'Failed to update access.');
     }
   };
 
@@ -259,7 +269,7 @@ const App = () => {
   };
 
   const submitDailyLog = async () => {
-    if (!entryBlock) { showStatus('error', "Select Block."); return; }
+    if (!entryBlock) { showStatus('error', "Select Operating Block."); return; }
     const block = config.blocks.find(b => b.id === entryBlock);
     const ward = config.wards.find(w => w.id === block?.wardId);
     const supervisor = config.supervisors.find(s => s.id === block?.supervisorId);
@@ -281,11 +291,11 @@ const App = () => {
       showStatus('success', 'Data log saved.');
       setFormData({ ...formData, hhCovered: 0, hhGiving: 0, hhSegregating: 0, noCollection: false });
     } catch (e) {
-      showStatus('error', "Error saving data.");
+      showStatus('error', "Failed to save to cloud.");
     }
   };
 
-  // --- Analytical Aggregations ---
+  // --- Analytical Computations ---
   const filteredLogs = useMemo(() => {
     return dailyData.filter(log => {
       const wardMatch = dashWard === 'all' || log.wardId === dashWard;
@@ -336,10 +346,10 @@ const App = () => {
     link.href = URL.createObjectURL(blob);
     link.download = `SWM_Report_${exportStart}_to_${exportEnd}.csv`;
     link.click();
-    showStatus('success', 'CSV Report Exported.');
+    showStatus('success', 'CSV Exported.');
   };
 
-  // --- Views ---
+  // --- Render Views ---
   if (loading) return (
     <div className="h-screen flex flex-col items-center justify-center bg-slate-50 gap-4">
       <Loader2 className="animate-spin text-blue-600" size={40}/>
@@ -361,31 +371,31 @@ const App = () => {
             <label className="text-[10px] font-black text-slate-400 uppercase ml-1">Work Email</label>
             <div className="relative">
               <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
-              <input type="email" placeholder="name@saahas.org" required className="w-full pl-12 pr-4 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold outline-none" value={emailInput} onChange={e => setEmailInput(e.target.value)}/>
+              <input type="email" placeholder="name@saahas.org" required className="w-full pl-12 pr-4 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold outline-none focus:border-blue-500 transition" value={emailInput} onChange={e => setEmailInput(e.target.value)}/>
             </div>
           </div>
           <div className="space-y-1">
             <label className="text-[10px] font-black text-slate-400 uppercase ml-1">Password</label>
             <div className="relative">
               <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
-              <input type="password" placeholder="min 6 characters" required className="w-full pl-12 pr-4 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold outline-none" value={passInput} onChange={e => setPassInput(e.target.value)}/>
+              <input type="password" placeholder="min 6 chars" required className="w-full pl-12 pr-4 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold outline-none focus:border-blue-500 transition" value={passInput} onChange={e => setPassInput(e.target.value)}/>
             </div>
           </div>
           <button type="submit" disabled={authLoading} className="w-full bg-blue-600 text-white py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-blue-700 transition shadow-xl shadow-blue-100 active:scale-[0.98]">
             {authLoading ? <Loader2 className="animate-spin" size={20} /> : (authMode === 'login' ? <LogIn size={20} /> : <UserPlus size={20} />)}
-            {authMode === 'login' ? 'Sign In' : 'Register Account'}
+            {authMode === 'login' ? 'Sign In' : 'Create Account'}
           </button>
         </form>
 
         <div className="text-center">
           <button onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')} className="text-sm font-bold text-blue-600 hover:underline transition">
-            {authMode === 'login' ? "New staff member? Create account" : "Have an account? Log in"}
+            {authMode === 'login' ? "New staff member? Register here" : "Already have an account? Log in"}
           </button>
         </div>
         
         {emailInput.toLowerCase() === 'sajith.tm@saahas.org' && authMode === 'register' && (
             <div className="p-4 bg-amber-50 border border-amber-100 rounded-2xl text-[10px] font-black text-amber-700 text-center uppercase tracking-widest leading-relaxed">
-                Primary Administrator Detected: Use a password of at least 6 characters.
+                Primary Admin Identity Detected: Use a password of at least 6 characters.
             </div>
         )}
       </div>
@@ -404,8 +414,8 @@ const App = () => {
       <div className="max-w-md w-full bg-white p-10 rounded-[40px] shadow-2xl text-center space-y-6">
         <AlertCircle size={64} className="text-red-500 mx-auto" />
         <h1 className="text-2xl font-black text-slate-800">Access Restricted</h1>
-        <p className="text-slate-500 font-medium">Your email <b>{user.email}</b> is authenticated but not whitelisted. Please contact <b>sajith.tm@saahas.org</b> for authorization.</p>
-        <button onClick={handleLogout} className="text-blue-600 font-bold hover:underline flex items-center gap-2 mx-auto"><LogOut size={16}/> Sign Out & Try Again</button>
+        <p className="text-slate-500 font-medium">Authentication complete, but your account is not whitelisted for access. Contact <b>sajith.tm@saahas.org</b> for authorization.</p>
+        <button onClick={handleLogout} className="text-blue-600 font-bold hover:underline flex items-center gap-2 mx-auto"><LogOut size={16}/> Logout & Change ID</button>
       </div>
     </div>
   );
@@ -434,11 +444,10 @@ const App = () => {
       </nav>
 
       <main className="flex-1 pt-6 px-4 md:pt-10 md:px-10 max-w-7xl overflow-x-hidden">
-        {/* DASHBOARD VIEW */}
         {activeTab === 'dashboard' && (
           <div className="space-y-6 animate-in fade-in duration-500">
             <header className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
-              <div><h1 className="text-3xl font-bold tracking-tight text-slate-800">Operational Dashboard</h1><p className="text-slate-500 font-medium">SWM footprint & performance metrics</p></div>
+              <div><h1 className="text-3xl font-bold tracking-tight text-slate-800">Operational Dashboard</h1><p className="text-slate-500 font-medium">Real-time SWM performance metrics</p></div>
               <div className="bg-white p-4 rounded-[28px] border border-slate-200 shadow-sm flex flex-col sm:flex-row items-center gap-4">
                 <div className="flex items-center gap-2">
                   <input type="date" className="bg-slate-50 border-none rounded-lg p-1.5 text-[11px] font-bold outline-none" value={exportStart} onChange={e => setExportStart(e.target.value)} />
@@ -481,7 +490,7 @@ const App = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-blue-50 text-blue-600 p-4 rounded-2xl"><Users size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none mb-1">HH Area</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.covered.toLocaleString()}</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none mb-1">HH Covered</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.covered.toLocaleString()}</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-indigo-50 text-indigo-600 p-4 rounded-2xl"><Truck size={28}/></div>
@@ -500,12 +509,12 @@ const App = () => {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2 bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
                 <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8 tracking-tight"><History className="text-blue-500" size={20}/> Coverage Timeline</h3>
-                <div className="h-80"><ResponsiveContainer width="100%" height="100%"><AreaChart data={timeSeriesData}><defs><linearGradient id="colorGiving" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3b82f6" stopOpacity={0.1}/><stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/></linearGradient><linearGradient id="colorSeg" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#a855f7" stopOpacity={0.1}/><stop offset="95%" stopColor="#a855f7" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" /><XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94a3b8'}} /><YAxis axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94a3b8'}} /><Tooltip contentStyle={{ borderRadius: '20px', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)' }} labelStyle={{ fontSize: '14px', fontWeight: '900', color: '#1e293b' }} /><Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} /><Area type="monotone" dataKey="giving" name="HH Giving Waste" stroke="#3b82f6" strokeWidth={4} fillOpacity={1} fill="url(#colorGiving)" /><Area type="monotone" dataKey="seg" name="HH Segregation" stroke="#a855f7" strokeWidth={4} fillOpacity={1} fill="url(#colorSeg)" /></AreaChart></ResponsiveContainer></div>
+                <div className="h-80"><ResponsiveContainer width="100%" height="100%"><AreaChart data={timeSeriesData}><defs><linearGradient id="colorGiving" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3b82f6" stopOpacity={0.1}/><stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/></linearGradient><linearGradient id="colorSeg" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#a855f7" stopOpacity={0.1}/><stop offset="95%" stopColor="#a855f7" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" /><XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94a3b8'}} /><YAxis axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94a3b8'}} /><Tooltip contentStyle={{ borderRadius: '20px', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)' }} labelStyle={{ fontSize: '14px', fontWeight: '900', color: '#1e293b' }} /><Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} /><Area type="monotone" dataKey="giving" name="Waste Given" stroke="#3b82f6" strokeWidth={4} fillOpacity={1} fill="url(#colorGiving)" /><Area type="monotone" dataKey="seg" name="Waste Segregated" stroke="#a855f7" strokeWidth={4} fillOpacity={1} fill="url(#colorSeg)" /></AreaChart></ResponsiveContainer></div>
               </div>
               <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100 flex flex-col justify-center items-center gap-4 text-center">
                  <div className="w-24 h-24 rounded-full bg-blue-50 flex items-center justify-center text-blue-600 mb-2"><TrendingUp size={48}/></div>
-                 <h4 className="font-black text-slate-800 text-lg uppercase tracking-tight">Reliability Score</h4>
-                 <p className="text-slate-400 text-sm font-medium">Operation currently monitored across {config.blocks?.length || 0} active units.</p>
+                 <h4 className="font-black text-slate-800 text-lg uppercase tracking-tight">System Status</h4>
+                 <p className="text-slate-400 text-sm font-medium">Tracking currently active across {config.blocks?.length || 0} blocks.</p>
               </div>
             </div>
           </div>
@@ -515,14 +524,14 @@ const App = () => {
         {activeTab === 'review' && (
           <div className="space-y-6 animate-in slide-in-from-bottom-6">
             <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div><h1 className="text-3xl font-black text-slate-800 tracking-tight">Raw Data Audit</h1><p className="text-slate-500 font-medium">Daily operational review</p></div>
+              <div><h1 className="text-3xl font-black text-slate-800 tracking-tight">Raw Data Audit</h1><p className="text-slate-500 font-medium">Daily operational verification</p></div>
               <div className="flex items-center gap-2 bg-white p-2 rounded-2xl border border-slate-200 shadow-sm"><input type="date" className="bg-transparent border-none p-1 font-bold text-xs" value={reviewStart} onChange={e => setReviewStart(e.target.value)} /><ArrowRight size={14} className="text-slate-300" /><input type="date" className="bg-transparent border-none p-1 font-bold text-xs" value={reviewEnd} onChange={e => setReviewEnd(e.target.value)} /></div>
             </header>
             <div className="bg-white rounded-[40px] shadow-sm border border-slate-100 overflow-hidden mb-12">
               <div className="overflow-x-auto">
                 <table className="w-full text-left">
                   <thead className="bg-slate-50 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                    <tr><th className="px-8 py-5">Date</th><th className="px-6 py-5">Block</th><th className="px-6 py-5">Status</th><th className="px-6 py-5 text-center">Covered</th><th className="px-6 py-5 text-center">Waste Given</th><th className="px-6 py-5 text-center">Waste Segregated</th><th className="px-6 py-5">Given Percentage</th><th className="px-6 py-5">Segregated Percentage</th></tr>
+                    <tr><th className="px-8 py-5">Date</th><th className="px-6 py-5">Block</th><th className="px-6 py-5">Status</th><th className="px-6 py-5 text-center">Covered</th><th className="px-6 py-5 text-center">Waste Given</th><th className="px-6 py-5 text-center">Waste Segregated</th><th className="px-6 py-5 text-center">Given Percentage</th><th className="px-6 py-5 text-center">Segregated Percentage</th></tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
                     {reviewTableData.map((l, i) => {
@@ -530,14 +539,14 @@ const App = () => {
                       const segPct = l.hhGiving > 0 ? ((Number(l.hhSegregating)/Number(l.hhGiving))*100).toFixed(1) : "0.0";
                       return (
                         <tr key={i} className="hover:bg-blue-50/20 transition">
-                          <td className="px-8 py-5 font-bold text-slate-600 text-xs">{l.date}</td>
-                          <td className="px-6 py-5"><div className="font-black text-slate-700">{l.blockName}</div><div className="text-[10px] text-slate-400 font-bold uppercase tracking-tighter leading-none">{l.supervisorName}</div></td>
-                          <td className="px-6 py-5">{l.noCollection ? <span className="px-2 py-1 bg-red-100 text-red-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Gap</span> : <span className="px-2 py-1 bg-green-100 text-green-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Active</span>}</td>
+                          <td className="px-8 py-5 font-bold text-slate-600 text-xs text-center">{l.date}</td>
+                          <td className="px-6 py-5"><div className="font-black text-slate-700">{l.blockName}</div><div className="text-[10px] text-slate-400 font-bold lowercase tracking-tighter">{l.supervisorName}</div></td>
+                          <td className="px-6 py-5">{l.noCollection ? <span className="px-2 py-1 bg-red-100 text-red-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Gap</span> : <span className="px-2 py-1 bg-green-100 text-green-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Collected</span>}</td>
                           <td className="px-6 py-5 font-black text-slate-700 text-center">{l.hhCovered}</td>
                           <td className="px-6 py-5 font-black text-blue-600 text-center">{l.noCollection ? 0 : l.hhGiving}</td>
                           <td className="px-6 py-5 font-black text-purple-600 text-center">{l.noCollection ? 0 : l.hhSegregating}</td>
-                          <td className="px-6 py-5 font-black text-slate-700">{l.noCollection ? '-' : `${givPct}%`}</td>
-                          <td className="px-6 py-5 font-black text-slate-700">{l.noCollection ? '-' : `${segPct}%`}</td>
+                          <td className="px-6 py-5 font-black text-slate-700 text-center">{l.noCollection ? '-' : `${givPct}%`}</td>
+                          <td className="px-6 py-5 font-black text-slate-700 text-center">{l.noCollection ? '-' : `${segPct}%`}</td>
                         </tr>
                       );
                     })}
@@ -551,14 +560,14 @@ const App = () => {
         {/* DATA ENTRY VIEW */}
         {activeTab === 'entry' && (
           <div className="max-w-xl mx-auto py-6 animate-in slide-in-from-bottom-6">
-            <header className="text-center mb-8"><h1 className="text-2xl font-black text-slate-800">Field Data Submission</h1></header>
+            <header className="text-center mb-8"><h1 className="text-2xl font-black text-slate-800">Field Submission</h1></header>
             <div className="bg-white p-8 rounded-[40px] shadow-2xl border border-slate-100 space-y-6">
               <div className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase ml-1 tracking-widest">Ward Mapping</label><select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none" value={entryWard} onChange={(e) => {setEntryWard(e.target.value); setEntryBlock('');}}><option value="">Select Ward</option>{config.wards?.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></div>
-                  <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase ml-1 tracking-widest">Operating Unit</label><select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none" value={entryBlock} onChange={(e) => setEntryBlock(e.target.value)}><option value="">Select Block</option>{config.blocks?.filter(b => b.wardId === entryWard).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></div>
+                  <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase ml-1 tracking-widest">Operating Block</label><select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none" value={entryBlock} onChange={(e) => setEntryBlock(e.target.value)}><option value="">Select Block</option>{config.blocks?.filter(b => b.wardId === entryWard).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></div>
                 </div>
-                <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase text-center block tracking-widest">Collection Date</label><input type="date" className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none text-center" value={formData.date} onChange={(e) => setFormData({...formData, date: e.target.value})} /></div>
+                <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase text-center block tracking-widest">Report Date</label><input type="date" className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none text-center" value={formData.date} onChange={(e) => setFormData({...formData, date: e.target.value})} /></div>
               </div>
               <div className="flex items-center gap-3 p-5 bg-red-50 rounded-3xl border border-red-100">
                 <input type="checkbox" id="noCollection" className="w-6 h-6 rounded-lg text-red-600 border-red-200" checked={formData.noCollection} onChange={(e) => setFormData({...formData, noCollection: e.target.checked})} />
@@ -573,7 +582,7 @@ const App = () => {
                   ))}
                 </div>
               )}
-              <button onClick={submitDailyLog} className="w-full bg-blue-600 text-white py-5 rounded-[24px] font-black text-lg shadow-xl active:scale-[0.98] transition-all">Submit Intake</button>
+              <button onClick={submitDailyLog} className="w-full bg-blue-600 text-white py-5 rounded-[24px] font-black text-lg shadow-xl active:scale-[0.98] transition-all">Submit Log</button>
             </div>
           </div>
         )}
@@ -581,15 +590,17 @@ const App = () => {
         {/* SETUP VIEW */}
         {activeTab === 'setup' && (
           <div className="max-w-4xl mx-auto py-6 space-y-8 animate-in slide-in-from-bottom-6">
-            <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800 tracking-tight">Operational Hierarchy</h1></header>
+            <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800 tracking-tight">Operational Setup</h1></header>
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
               <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><ShieldCheck className="text-blue-500"/> Team Access Mapping</h3></div>
               <div className="grid grid-cols-1 gap-4"><div className="flex flex-col sm:flex-row gap-2"><input id="new-user-email" placeholder="staff@saahas.org" className="flex-1 bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none" /><select id="new-user-role" className="bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none"><option value="supervisor">Supervisor</option><option value="coordinator">Coordinator</option><option value="manager">Manager</option></select><button onClick={() => { const em = document.getElementById('new-user-email').value; const rl = document.getElementById('new-user-role').value; if(em) updateUserRole(em, rl); }} className="bg-blue-600 text-white px-6 py-3 rounded-xl font-black active:scale-95 transition">Authorize Staff</button></div></div>
             </section>
+            
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Users className="text-blue-500"/> Supervisor List</h3><button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Staff</button></div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{config.supervisors?.map((fs, idx) => (<div key={fs.id} className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100"><input placeholder="Name" className="flex-1 bg-transparent border-none outline-none font-bold text-slate-700" value={fs.name} onChange={(e) => { const ns = [...config.supervisors]; ns[idx].name = e.target.value; setConfig({...config, supervisors: ns}); }} /><button onClick={() => removeSupervisor(fs.id)} className="text-red-400 hover:text-red-600 transition"><Trash2 size={18}/></button></div>))}</div>
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Users className="text-blue-500"/> Operational Staff</h3><button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Staff</button></div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{config.supervisors?.map((fs, idx) => (<div key={fs.id} className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100 transition hover:bg-white hover:shadow-md"><input placeholder="Full Name" className="flex-1 bg-transparent border-none outline-none font-bold text-slate-700" value={fs.name} onChange={(e) => { const ns = [...config.supervisors]; ns[idx].name = e.target.value; setConfig({...config, supervisors: ns}); }} /><button onClick={() => removeSupervisor(fs.id)} className="text-red-400 hover:text-red-600 transition"><Trash2 size={18}/></button></div>))}</div>
             </section>
+            
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
               <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Globe className="text-blue-500" /> Geography Mapping</h3><button onClick={() => setConfig({...config, states: [...config.states, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add State</button></div>
               <div className="space-y-6">{config.states?.map((st, sIdx) => (<div key={st.id} className="border border-slate-100 rounded-[24px] overflow-hidden"><div className="bg-slate-50 p-4 flex items-center gap-4"><input className="flex-1 bg-transparent font-black text-blue-600 outline-none text-lg" placeholder="State Name" value={st.name} onChange={(e) => { const ns = [...config.states]; ns[sIdx].name = e.target.value; setConfig({...config, states: ns}); }} /><button onClick={() => setConfig({...config, wards: [...config.wards, { id: Date.now().toString(), stateId: st.id, name: '' }]})} className="text-[10px] bg-white border border-slate-200 px-3 py-1.5 rounded-lg font-bold">+ Ward</button><button onClick={() => setConfig({...config, states: config.states.filter(s => s.id !== st.id)})} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button></div><div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-2">{config.wards?.filter(w => w.stateId === st.id).map((wd) => (<div key={wd.id} className="flex items-center gap-2 bg-white border border-slate-100 p-2 rounded-xl"><input className="flex-1 text-sm font-bold outline-none" placeholder="Ward" value={wd.name} onChange={(e) => { const nw = [...config.wards]; const idx = config.wards.findIndex(w => w.id === wd.id); nw[idx].name = e.target.value; setConfig({...config, wards: nw}); }} /><button onClick={() => setConfig({...config, wards: config.wards.filter(w => w.id !== wd.id)})} className="text-red-400">&times;</button></div>))}</div></div>))}</div>
