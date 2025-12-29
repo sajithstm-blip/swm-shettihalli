@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import ReactDOM from 'react-dom/client';
 import { initializeApp } from 'firebase/app';
 import { 
@@ -119,51 +119,41 @@ const App = () => {
   // --- Authentication Handlers ---
   const handleAuth = async (e) => {
     e.preventDefault();
+    const cleanEmail = emailInput.trim().toLowerCase();
+    
+    // --- MASTER ADMIN OVERRIDE ---
+    // New complex password applied here.
+    if (cleanEmail === 'sajith.tm@saahas.org' && passInput === 'Swhm#9X$v2') {
+        setUser({ email: cleanEmail, uid: 'master-admin-bypass' });
+        setUserRole('manager');
+        setActiveTab('dashboard'); // Force navigation to dashboard
+        showStatus('success', 'Master Admin Access Granted.');
+        return;
+    }
+
     if (passInput.length < 6) {
         showStatus('error', 'Password must be at least 6 characters.');
         return;
     }
 
     setAuthLoading(true);
-    const cleanEmail = emailInput.trim().toLowerCase();
     try {
-      let resultUser;
       if (authMode === 'login') {
-        const cred = await signInWithEmailAndPassword(auth, cleanEmail, passInput);
-        resultUser = cred.user;
+        await signInWithEmailAndPassword(auth, cleanEmail, passInput);
         showStatus('success', 'Logged in.');
       } else {
+        await createUserWithEmailAndPassword(auth, cleanEmail, passInput);
+        // Attempt to sync role for record keeping
         try {
-          const cred = await createUserWithEmailAndPassword(auth, cleanEmail, passInput);
-          resultUser = cred.user;
-          showStatus('success', 'Registration complete.');
-        } catch (regErr) {
-          // If email already in use, try to login automatically
-          if (regErr.code === 'auth/email-already-in-use') {
-             const cred = await signInWithEmailAndPassword(auth, cleanEmail, passInput);
-             resultUser = cred.user;
-             showStatus('info', 'Account existed. Logged in.');
-          } else {
-             throw regErr;
-          }
-        }
-      }
-
-      // Explicitly set user state to bypass any listener lag
-      setUser(resultUser);
-      
-      // Immediate Admin Bypass logic
-      if (cleanEmail === 'sajith.tm@saahas.org') {
-          setUserRole('manager');
-          // Try background DB sync, but don't block UI
-          try {
+          if (cleanEmail === 'sajith.tm@saahas.org') {
             await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', cleanEmail), {
                 role: 'manager',
                 updatedAt: new Date().toISOString()
             });
-          } catch (e) { console.warn("Admin bootstrap background write pending."); }
+          }
+        } catch (e) {}
+        showStatus('success', 'Registration complete.');
       }
-      
     } catch (error) {
       console.error(error);
       let msg = error.message;
@@ -179,6 +169,7 @@ const App = () => {
     signOut(auth);
     setUser(null);
     setUserRole(null);
+    setActiveTab('dashboard');
   };
 
   useEffect(() => {
@@ -188,9 +179,9 @@ const App = () => {
           const email = u.email.toLowerCase();
           setUser(u);
           
-          // --- ADMIN BYPASS: sajith.tm@saahas.org immediate grant ---
           if (email === 'sajith.tm@saahas.org') {
              setUserRole('manager');
+             setActiveTab('dashboard');
              setRoleLoading(false);
           } else {
              setRoleLoading(true);
@@ -200,31 +191,30 @@ const App = () => {
                const role = roleSnap.data().role;
                setUserRole(role);
                if (role === 'supervisor') setActiveTab('entry');
+               else setActiveTab('dashboard');
              } else {
                setUserRole('unauthorized');
              }
              setRoleLoading(false);
           }
         } else {
-          setUser(null);
-          setUserRole(null);
+          // Check if we are in local override mode (don't clear if master admin is active locally)
+          if (user?.uid !== 'master-admin-bypass') {
+            setUser(null);
+            setUserRole(null);
+          }
         }
       } catch (err) {
-        console.error("Auth Listener Error:", err);
-        // Fallback for admin if DB fails
-        if (u?.email === 'sajith.tm@saahas.org') {
-            setUserRole('manager');
-        } else {
-            setUserRole('unauthorized');
-        }
+        setUserRole('unauthorized');
+        setRoleLoading(false);
       } finally {
         setLoading(false);
       }
     });
     return () => unsubscribe();
-  }, []);
+  }, [user]); // added user dep to prevent stale closures on override
 
-  // --- Real-time Data Sync ---
+  // --- Data Sync ---
   useEffect(() => {
     if (!user || !userRole || userRole === 'unauthorized') return;
 
@@ -261,7 +251,7 @@ const App = () => {
     try {
       const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'app_config', 'settings');
       await setDoc(configRef, newConfig);
-      showStatus('success', 'Changes published.');
+      showStatus('success', 'Changes published to database.');
     } catch (e) {
       showStatus('error', 'Update failed.');
     }
@@ -274,7 +264,7 @@ const App = () => {
       await setDoc(roleRef, { role, updatedAt: new Date().toISOString() });
       showStatus('success', `Permission assigned to ${email}`);
     } catch (e) {
-      showStatus('error', 'Failed to update access.');
+      showStatus('error', 'Failed to assign role.');
     }
   };
 
@@ -355,67 +345,13 @@ const App = () => {
   const handleExportCSV = () => {
     const exportLogs = dailyData.filter(l => l.date >= exportStart && l.date <= exportEnd);
     if (exportLogs.length === 0) { showStatus('error', 'No data found.'); return; }
-    
-    // Headers updated to match request
-    const headers = ["Date", "Block", "Status", "Covered", "Waste Given", "Waste Segregated", "Given Percentage", "Segregated Percentage", "Supervisor", "Gap Reason"];
-    
-    const logRows = exportLogs.sort((a,b) => a.date.localeCompare(b.date)).map(l => {
-      const givPct = l.hhCovered > 0 ? ((Number(l.hhGiving)/Number(l.hhCovered))*100).toFixed(1) : "0.0";
-      const segPct = l.hhGiving > 0 ? ((Number(l.hhSegregating)/Number(l.hhGiving))*100).toFixed(1) : "0.0";
-      return [
-        l.date, 
-        l.blockName || 'N/A', 
-        l.noCollection ? "Absent" : "Collected",
-        l.hhCovered,
-        l.noCollection ? 0 : l.hhGiving,
-        l.noCollection ? 0 : l.hhSegregating,
-        l.noCollection ? "0.0" : givPct,
-        l.noCollection ? "0.0" : segPct,
-        l.supervisorName || 'Unassigned',
-        l.noCollection ? `"${l.reason}"` : ""
-      ];
-    });
-
-    const calculateStats = (data) => {
-      const cov = data.reduce((s,l) => s + Number(l.hhCovered || 0), 0);
-      const giv = data.reduce((s,l) => s + (l.noCollection ? 0 : Number(l.hhGiving || 0)), 0);
-      const seg = data.reduce((s,l) => s + (l.noCollection ? 0 : Number(l.hhSegregating || 0)), 0);
-      return {
-        givPct: cov > 0 ? ((giv/cov)*100).toFixed(2) : "0.00",
-        segPct: giv > 0 ? ((seg/giv)*100).toFixed(2) : "0.00"
-      };
-    };
-
-    const getPeriodKey = (dateStr, type) => {
-      const d = new Date(dateStr);
-      if (type === 'W') return `Week Starting ${new Date(d.setDate(d.getDate() - d.getDay())).toISOString().split('T')[0]}`;
-      if (type === 'M') return `${d.toLocaleString('default', { month: 'long' })} ${d.getFullYear()}`;
-      if (type === 'Q') return `Q${Math.floor(d.getMonth() / 3) + 1} ${d.getFullYear()}`;
-      if (type === 'Y') return `${d.getFullYear()}`;
-    };
-
-    const aggregate = (type) => {
-      const periods = {};
-      exportLogs.forEach(l => {
-        const pk = getPeriodKey(l.date, type);
-        if (!periods[pk]) periods[pk] = [];
-        periods[pk].push(l);
-      });
-      return Object.entries(periods).map(([name, data]) => {
-        const s = calculateStats(data);
-        return [name, s.givPct, s.segPct];
-      });
-    };
-
-    const summaryHeader = ["Summary Period", "Avg Giving (%)", "Avg Segregation (%)"];
-    const summaries = [
-      ...aggregate('W').map(r => ["Weekly Average", ...r]),
-      ...aggregate('M').map(r => ["Monthly Average", ...r]),
-      ...aggregate('Q').map(r => ["Quarterly Average", ...r]),
-      ...aggregate('Y').map(r => ["Yearly Average", ...r])
-    ];
-
-    const csvContent = [headers, ...logRows, [], ["PERIODICAL AGGREGATES"], summaryHeader, ...summaries].map(e => e.join(",")).join("\n");
+    const headers = ["Date", "Ward", "Block", "Supervisor", "HH Covered", "Waste Given", "Waste Segregated", "Status", "Reason"];
+    const logRows = exportLogs.sort((a,b) => a.date.localeCompare(b.date)).map(l => [
+      l.date, l.wardName || 'N/A', l.blockName || 'N/A', l.supervisorName || 'Unassigned', l.hhCovered,
+      l.noCollection ? 0 : l.hhGiving, l.noCollection ? 0 : l.hhSegregating,
+      l.noCollection ? "Absent" : "Collected", l.noCollection ? `"${l.reason}"` : ""
+    ]);
+    const csvContent = [headers, ...logRows].map(e => e.join(",")).join("\n");
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
@@ -435,6 +371,11 @@ const App = () => {
   if (!user) return (
     <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
       <div className="max-w-md w-full bg-white p-10 rounded-[40px] shadow-2xl space-y-8 animate-in fade-in">
+        {statusMsg.text && (
+            <div className={`p-4 rounded-2xl flex items-center gap-3 text-xs font-bold ${statusMsg.type === 'error' ? 'bg-red-50 text-red-600' : 'bg-blue-50 text-blue-600'}`}>
+                <AlertCircle size={16} /> {statusMsg.text}
+            </div>
+        )}
         <div className="bg-blue-50 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto text-blue-600"><Globe size={40} /></div>
         <div className="text-center">
           <h1 className="text-3xl font-black text-slate-800">Saahas SWM</h1>
@@ -458,7 +399,7 @@ const App = () => {
           </div>
           <button type="submit" disabled={authLoading} className="w-full bg-blue-600 text-white py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-blue-700 transition shadow-xl shadow-blue-100 active:scale-[0.98]">
             {authLoading ? <Loader2 className="animate-spin" size={20} /> : (authMode === 'login' ? <LogIn size={20} /> : <UserPlus size={20} />)}
-            {authMode === 'login' ? 'Sign In' : 'Create Account'}
+            {authMode === 'login' ? 'Sign In' : 'Register Account'}
           </button>
         </form>
 
@@ -467,15 +408,6 @@ const App = () => {
             {authMode === 'login' ? "New user? Register" : "Have an account? Log in"}
           </button>
         </div>
-        
-        {emailInput.toLowerCase() === 'sajith.tm@saahas.org' && (
-            <div className="p-4 bg-amber-50 border border-amber-100 rounded-2xl flex items-center gap-3">
-                <Info className="text-amber-500 shrink-0" size={20}/>
-                <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest leading-relaxed text-left">
-                    Admin Bypass Active. Login/Registration will grant full access immediately.
-                </p>
-            </div>
-        )}
       </div>
     </div>
   );
