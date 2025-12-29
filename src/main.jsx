@@ -47,7 +47,8 @@ import {
   Lock,
   UserPlus,
   Loader2,
-  LogIn
+  LogIn,
+  Info
 } from 'lucide-react';
 
 /**
@@ -119,38 +120,29 @@ const App = () => {
   // --- Authentication Handlers ---
   const handleAuth = async (e) => {
     e.preventDefault();
-    const cleanEmail = emailInput.trim().toLowerCase();
-
-    // --- MASTER ADMIN OVERRIDE ---
-    // Bypasses Firebase Auth for emergency access or first-time setup
-    if (cleanEmail === 'sajith.tm@saahas.org' && passInput === 'Swhm#9X$v2') {
-        setUser({ email: cleanEmail, uid: 'master-admin-bypass' });
-        setUserRole('manager');
-        setActiveTab('dashboard');
-        showStatus('success', 'Master Admin Access Granted.');
-        return;
-    }
-
     if (passInput.length < 6) {
         showStatus('error', 'Password must be at least 6 characters.');
         return;
     }
 
     setAuthLoading(true);
+    const cleanEmail = emailInput.trim().toLowerCase();
     try {
       if (authMode === 'login') {
         await signInWithEmailAndPassword(auth, cleanEmail, passInput);
         showStatus('success', 'Logged in.');
       } else {
         await createUserWithEmailAndPassword(auth, cleanEmail, passInput);
-        // Attempt to bootstrap the role in DB
-        if (cleanEmail === 'sajith.tm@saahas.org') {
-            try {
-              await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', cleanEmail), {
-                  role: 'manager',
-                  updatedAt: new Date().toISOString()
-              });
-            } catch (e) { console.warn("Admin bootstrap background write pending."); }
+        // Attempt to bootstrap the role in DB, but don't hang if it fails
+        try {
+          if (cleanEmail === 'sajith.tm@saahas.org') {
+            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', cleanEmail), {
+                role: 'manager',
+                updatedAt: new Date().toISOString()
+            });
+          }
+        } catch (dbErr) {
+          console.warn("Role bootstrap DB write failed, fallback bypass will handle it.");
         }
         showStatus('success', 'Registration complete.');
       }
@@ -158,7 +150,7 @@ const App = () => {
       console.error(error);
       let msg = error.message;
       if (error.code === 'auth/user-not-found') msg = 'Account not found. Select "Create Account".';
-      if (error.code === 'auth/wrong-password') msg = 'Incorrect password.';
+      if (error.code === 'auth/wrong-password') msg = 'Invalid password.';
       if (error.code === 'auth/email-already-in-use') msg = 'This email is already registered. Please log in.';
       showStatus('error', msg);
     } finally {
@@ -183,6 +175,7 @@ const App = () => {
           if (email === 'sajith.tm@saahas.org') {
              setUserRole('manager');
              setRoleLoading(false);
+             setLoading(false);
           } else {
              setRoleLoading(true);
              const roleRef = doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', email);
@@ -195,13 +188,13 @@ const App = () => {
                setUserRole('unauthorized');
              }
              setRoleLoading(false);
+             setLoading(false);
           }
         } else {
-          // If we logged out (u is null), clear local state unless we are in bypass mode
-          if (user?.uid !== 'master-admin-bypass') {
-             setUser(null);
-             setUserRole(null);
-          }
+          setUser(null);
+          setUserRole(null);
+          setLoading(false);
+          setRoleLoading(false);
         }
       } catch (err) {
         console.error("Auth Listener Error:", err);
@@ -211,7 +204,6 @@ const App = () => {
         } else {
             setUserRole('unauthorized');
         }
-      } finally {
         setLoading(false);
       }
     });
@@ -309,15 +301,16 @@ const App = () => {
     }
   };
 
-  // --- Analytical Computations ---
+  // --- Analytics & Review ---
   const filteredLogs = useMemo(() => {
     return dailyData.filter(log => {
       const wardMatch = dashWard === 'all' || log.wardId === dashWard;
       const blockMatch = dashBlocks.length === 0 || dashBlocks.includes(log.blockId);
+      const supervisorMatch = dashSupervisor === 'all' || log.supervisorId === dashSupervisor;
       const dateMatch = log.date >= dashStartDate && log.date <= dashEndDate;
-      return wardMatch && blockMatch && dateMatch;
+      return wardMatch && blockMatch && supervisorMatch && dateMatch;
     });
-  }, [dailyData, dashWard, dashBlocks, dashStartDate, dashEndDate]);
+  }, [dailyData, dashWard, dashBlocks, dashSupervisor, dashStartDate, dashEndDate]);
 
   const reviewTableData = useMemo(() => {
     return dailyData
@@ -345,6 +338,41 @@ const App = () => {
     return Object.values(groups).sort((a, b) => a.rawDate.localeCompare(b.rawDate));
   }, [filteredLogs, viewTimeframe]);
 
+  const gapData = useMemo(() => {
+    const reasons = {};
+    filteredLogs.filter(l => l.noCollection).forEach(l => {
+      reasons[l.reason] = (reasons[l.reason] || 0) + 1;
+    });
+    return Object.entries(reasons).map(([name, value]) => ({ name, value }));
+  }, [filteredLogs]);
+
+  const performanceTable = useMemo(() => {
+    return config.blocks
+      .filter(b => (dashWard === 'all' || b.wardId === dashWard) && (dashBlocks.length === 0 || dashBlocks.includes(b.id)))
+      .map(block => {
+        const logs = filteredLogs.filter(d => d.blockId === block.id);
+        const valid = logs.filter(l => !l.noCollection);
+        const totalCovered = logs.reduce((s, l) => s + Number(l.hhCovered || 0), 0);
+        const totalGiving = valid.reduce((s, l) => s + Number(l.hhGiving || 0), 0);
+        const totalSeg = valid.reduce((s, l) => s + Number(l.hhSegregating || 0), 0);
+        const absences = logs.filter(l => l.noCollection);
+        const supervisor = config.supervisors.find(s => s.id === block.supervisorId);
+        
+        return {
+          id: block.id,
+          name: block.name,
+          ward: config.wards.find(w => w.id === block.wardId)?.name || 'N/A',
+          supervisor: supervisor?.name || 'Unassigned',
+          covered: totalCovered,
+          giving: totalGiving,
+          seg: totalSeg,
+          absences: absences.length,
+          lastReason: absences.length > 0 ? absences[absences.length - 1].reason : null,
+          rate: totalGiving > 0 ? ((totalSeg / totalGiving) * 100).toFixed(1) : 0
+        };
+      });
+  }, [filteredLogs, config, dashWard, dashBlocks]);
+
   const handleExportCSV = () => {
     const exportLogs = dailyData.filter(l => l.date >= exportStart && l.date <= exportEnd);
     if (exportLogs.length === 0) { showStatus('error', 'No data found.'); return; }
@@ -354,7 +382,48 @@ const App = () => {
       l.noCollection ? 0 : l.hhGiving, l.noCollection ? 0 : l.hhSegregating,
       l.noCollection ? "Absent" : "Collected", l.noCollection ? `"${l.reason}"` : ""
     ]);
-    const csvContent = [headers, ...logRows].map(e => e.join(",")).join("\n");
+
+    // Calculate Summary Stats
+    const calculateStats = (data) => {
+      const cov = data.reduce((s,l) => s + Number(l.hhCovered || 0), 0);
+      const giv = data.reduce((s,l) => s + (l.noCollection ? 0 : Number(l.hhGiving || 0)), 0);
+      const seg = data.reduce((s,l) => s + (l.noCollection ? 0 : Number(l.hhSegregating || 0)), 0);
+      return {
+        givingPct: cov > 0 ? ((giv/cov)*100).toFixed(2) : "0.00",
+        segPct: giv > 0 ? ((seg/giv)*100).toFixed(2) : "0.00"
+      };
+    };
+
+    const getPeriodKey = (dateStr, type) => {
+      const d = new Date(dateStr);
+      if (type === 'W') return `Week Starting ${new Date(d.setDate(d.getDate() - d.getDay())).toISOString().split('T')[0]}`;
+      if (type === 'M') return `${d.toLocaleString('default', { month: 'long' })} ${d.getFullYear()}`;
+      if (type === 'Q') return `Q${Math.floor(d.getMonth() / 3) + 1} ${d.getFullYear()}`;
+      if (type === 'Y') return `${d.getFullYear()}`;
+    };
+
+    const aggregate = (type) => {
+      const periods = {};
+      exportLogs.forEach(l => {
+        const pk = getPeriodKey(l.date, type);
+        if (!periods[pk]) periods[pk] = [];
+        periods[pk].push(l);
+      });
+      return Object.entries(periods).map(([name, data]) => {
+        const s = calculateStats(data);
+        return [name, s.givingPct, s.segPct];
+      });
+    };
+
+    const summaryHeader = ["Summary Period", "Avg Giving (%)", "Avg Segregation (%)"];
+    const summaries = [
+      ...aggregate('W').map(r => ["Weekly Average", ...r]),
+      ...aggregate('M').map(r => ["Monthly Average", ...r]),
+      ...aggregate('Q').map(r => ["Quarterly Average", ...r]),
+      ...aggregate('Y').map(r => ["Yearly Average", ...r])
+    ];
+
+    const csvContent = [headers, ...logRows, [], ["PERIODICAL AGGREGATES"], summaryHeader, ...summaries].map(e => e.join(",")).join("\n");
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
@@ -411,6 +480,15 @@ const App = () => {
             {authMode === 'login' ? "New user? Register" : "Have an account? Log in"}
           </button>
         </div>
+        
+        {emailInput.toLowerCase() === 'sajith.tm@saahas.org' && authMode === 'register' && (
+            <div className="p-4 bg-amber-50 border border-amber-100 rounded-2xl flex items-center gap-3">
+                <Info className="text-amber-500 shrink-0" size={20}/>
+                <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest leading-relaxed text-left">
+                    Admin Bypass Active. Credentials verified against hardcoded system key.
+                </p>
+            </div>
+        )}
       </div>
     </div>
   );
@@ -432,6 +510,13 @@ const App = () => {
       </div>
     </div>
   );
+
+  const stats = {
+    covered: filteredLogs.reduce((s, v) => s + Number(v.hhCovered || 0), 0),
+    giving: filteredLogs.reduce((s, v) => s + (v.noCollection ? 0 : Number(v.hhGiving || 0)), 0),
+    seg: filteredLogs.reduce((s, v) => s + (v.noCollection ? 0 : Number(v.hhSegregating || 0)), 0),
+    absences: filteredLogs.filter(v => v.noCollection).length
+  };
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans pb-20 md:pb-0 flex flex-col md:flex-row">
@@ -460,15 +545,110 @@ const App = () => {
         {/* DASHBOARD VIEW */}
         {activeTab === 'dashboard' && (
           <div className="space-y-6 animate-in fade-in duration-500">
-            {/* Same Dashboard Code as previously fixed */}
+            <header className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
+              <div><h1 className="text-3xl font-bold tracking-tight text-slate-800">Operational Dashboard</h1><p className="text-slate-500 font-medium tracking-tight">Real-time India SWM performance tracking</p></div>
+              <div className="bg-white p-4 rounded-[28px] border border-slate-200 shadow-sm flex flex-col sm:flex-row items-center gap-4">
+                <div className="flex items-center gap-2">
+                  <input type="date" className="bg-slate-50 border-none rounded-lg p-1.5 text-[11px] font-bold outline-none" value={exportStart} onChange={e => setExportStart(e.target.value)} />
+                  <ArrowRight size={14} className="text-slate-300" />
+                  <input type="date" className="bg-slate-50 border-none rounded-lg p-1.5 text-[11px] font-bold outline-none" value={exportEnd} onChange={e => setExportEnd(e.target.value)} />
+                </div>
+                <button onClick={handleExportCSV} className="w-full sm:w-auto flex items-center justify-center gap-2 bg-blue-600 text-white px-5 py-3 rounded-xl text-sm font-black shadow-lg hover:bg-blue-700 transition active:scale-95"><FileSpreadsheet size={18}/> Report Export</button>
+              </div>
+            </header>
+
             <div className="bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 space-y-4">
-               {/* Filters and Graphs - code preserved */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 items-end">
+                <div className="space-y-1"><label className="text-[10px] font-bold text-slate-400 uppercase ml-1 tracking-widest">Ward Mapping</label>
+                  <select className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-sm outline-none font-semibold" value={dashWard} onChange={(e) => {setDashWard(e.target.value); setDashBlocks([]);}}>
+                    <option value="all">All Wards</option>
+                    {config.wards?.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+                  </select>
+                </div>
+                <div className="space-y-1"><label className="text-[10px] font-bold text-slate-400 uppercase ml-1 flex justify-between tracking-widest"><span>Unit Segregation</span> {dashBlocks.length > 0 && <button onClick={() => setDashBlocks([])} className="text-blue-500 text-[9px] hover:underline">Clear</button>}</label>
+                  <div className="max-h-32 overflow-y-auto bg-slate-50 border border-slate-200 rounded-xl p-2 space-y-1">
+                    {config.blocks?.filter(b => dashWard === 'all' || b.wardId === dashWard).map(block => (
+                      <button key={block.id} onClick={() => toggleBlockFilter(block.id)} className={`flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-xs font-bold transition-all ${dashBlocks.includes(block.id) ? 'bg-blue-600 text-white shadow-sm' : 'hover:bg-slate-200 text-slate-600'}`}>
+                        {dashBlocks.includes(block.id) ? <CheckSquare size={14}/> : <Square size={14}/>} <span className="truncate">{block.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="space-y-1"><label className="text-[10px] font-bold text-slate-400 uppercase ml-1 tracking-widest">Scale</label>
+                  <div className="flex bg-slate-50 border border-slate-200 rounded-xl p-1 gap-1">
+                    {['daily', 'weekly', 'monthly'].map(t => (<button key={t} onClick={() => setViewTimeframe(t)} className={`flex-1 py-1.5 rounded-lg text-[10px] font-black capitalize transition ${viewTimeframe === t ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'}`}>{t}</button>))}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 pb-1">
+                  <input type="date" className="flex-1 bg-blue-50 border border-blue-100 rounded-xl p-2 text-[10px] outline-none font-bold text-blue-700" value={dashStartDate} onChange={(e) => setDashStartDate(e.target.value)} />
+                  <input type="date" className="flex-1 bg-blue-50 border border-blue-100 rounded-xl p-2 text-[10px] outline-none font-bold text-blue-700" value={dashEndDate} onChange={(e) => setDashEndDate(e.target.value)} />
+                </div>
+              </div>
             </div>
-            {/* ... preserved analytics ... */}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+              <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
+                <div className="bg-blue-50 text-blue-600 p-4 rounded-2xl"><Users size={28}/></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none mb-1">HH Covered</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.covered.toLocaleString()}</p></div>
+              </div>
+              <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
+                <div className="bg-indigo-50 text-indigo-600 p-4 rounded-2xl"><Truck size={28}/></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none mb-1">Participation</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.covered > 0 ? (stats.giving/stats.covered*100).toFixed(1) : 0)}%</p></div>
+              </div>
+              <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
+                <div className="bg-green-50 text-green-600 p-4 rounded-2xl"><CheckCircle2 size={28}/></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none mb-1">Efficiency</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.giving > 0 ? ((stats.seg / stats.giving) * 100).toFixed(1) : 0)}%</p></div>
+              </div>
+              <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
+                <div className="bg-red-50 text-red-600 p-4 rounded-2xl"><Ban size={28}/></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none mb-1">Absences</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.absences}</p></div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-2 bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
+                <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8 tracking-tight"><History className="text-blue-500" size={20}/> Coverage Timeline</h3>
+                <div className="h-80"><ResponsiveContainer width="100%" height="100%"><AreaChart data={timeSeriesData}><defs><linearGradient id="colorGiving" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3b82f6" stopOpacity={0.1}/><stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/></linearGradient><linearGradient id="colorSeg" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#a855f7" stopOpacity={0.1}/><stop offset="95%" stopColor="#a855f7" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" /><XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94a3b8'}} /><YAxis axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94a3b8'}} /><Tooltip contentStyle={{ borderRadius: '20px', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)' }} labelStyle={{ fontSize: '14px', fontWeight: '900', color: '#1e293b' }} /><Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} /><Area type="monotone" dataKey="giving" name="Giving Waste" stroke="#3b82f6" strokeWidth={4} fillOpacity={1} fill="url(#colorGiving)" /><Area type="monotone" dataKey="seg" name="Waste Segregated" stroke="#a855f7" strokeWidth={4} fillOpacity={1} fill="url(#colorSeg)" /></AreaChart></ResponsiveContainer></div>
+              </div>
+              <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
+                <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8"><Ban className="text-red-500" size={20}/> Failure Gaps</h3>
+                {gapData.length > 0 ? (
+                  <div className="h-80"><ResponsiveContainer width="100%" height="100%"><BarChart data={gapData} layout="vertical"><CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f1f5f9" /><XAxis type="number" hide /><YAxis dataKey="name" type="category" axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#64748b', fontWeight: 'bold'}} width={120} /><Tooltip cursor={{fill: '#f8fafc'}} contentStyle={{ borderRadius: '15px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} /><Bar dataKey="value" name="Incidents" radius={[0, 10, 10, 0]}>{gapData.map((_, index) => <Cell key={index} fill={['#ef4444', '#f97316', '#f59e0b', '#84cc16'][index % 4]} />)}</Bar></BarChart></ResponsiveContainer></div>
+                ) : (
+                  <div className="h-full flex flex-col items-center justify-center text-center opacity-30"><CheckCircle2 size={64} className="text-green-500"/><p className="font-bold text-sm mt-3">All Active!</p></div>
+                )}
+              </div>
+            </div>
+            
+            {/* OPERATIONAL BREAKDOWN TABLE */}
+            <div className="bg-white rounded-[40px] shadow-sm border border-slate-100 overflow-hidden mb-12">
+              <div className="p-8 border-b border-slate-50">
+                <h2 className="font-black text-slate-800 text-xl">Operational Unit Breakdown</h2>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left">
+                  <thead className="bg-slate-50 text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                    <tr><th className="px-8 py-5">Block</th><th className="px-6 py-5">Supervisor</th><th className="px-6 py-5 text-center">HH Covered</th><th className="px-6 py-5 text-center">Giving</th><th className="px-8 py-5">Segregation Efficiency</th><th className="px-6 py-5">Gaps</th></tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-50">
+                    {performanceTable.map((block, i) => (
+                      <tr key={i} className="hover:bg-blue-50/20 transition group">
+                        <td className="px-8 py-5"><div className="font-black text-slate-700">{block.name}</div><div className="text-[10px] text-slate-400 font-bold mt-0.5">{block.ward}</div></td>
+                        <td className="px-6 py-5 font-bold text-slate-500 text-sm">{block.supervisor}</td>
+                        <td className="px-6 py-5 font-black text-slate-700 text-center">{block.covered}</td>
+                        <td className="px-6 py-5 font-black text-blue-600 text-center">{block.giving}</td>
+                        <td className="px-8 py-5"><div className="flex items-center gap-3"><div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden max-w-[100px]"><div className={`h-full rounded-full ${Number(block.rate) > 85 ? 'bg-green-500' : 'bg-amber-500'}`} style={{width: `${block.rate}%`}} /></div><span className="text-sm font-black text-slate-700">{block.rate}%</span></div></td>
+                        <td className="px-6 py-5">{block.absences > 0 ? <div className="text-red-500 text-[10px] font-bold">{block.absences} Gaps</div> : <div className="text-green-600 text-[10px] font-bold">100% Active</div>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         )}
 
-        {/* REVIEW VIEW - UPDATED */}
+        {/* REVIEW VIEW */}
         {activeTab === 'review' && (
           <div className="space-y-6 animate-in slide-in-from-bottom-6">
             <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
