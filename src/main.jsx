@@ -126,28 +126,11 @@ const App = () => {
     setAuthLoading(true);
     showStatus('info', 'Connecting to Google...');
     try {
-      // First attempt popup
-      const result = await signInWithPopup(auth, googleProvider);
-      const email = result.user.email.toLowerCase();
-      if (!email.endsWith('@saahas.org')) {
-        await signOut(auth);
-        showStatus('error', 'Only @saahas.org emails allowed.');
-      } else {
-        showStatus('success', 'Authenticated! Fetching roles...');
-      }
+      // Use Redirect for better compatibility with Vercel and iFrames
+      await signInWithRedirect(auth, googleProvider);
     } catch (error) {
-      console.error("Auth Popup Error:", error);
-      // Fallback to redirect if popup is blocked
-      if (error.code === 'auth/popup-blocked' || error.code === 'auth/cancelled-popup-request') {
-        try {
-          await signInWithRedirect(auth, googleProvider);
-        } catch (redirectErr) {
-          showStatus('error', 'Login window blocked. Please enable popups.');
-        }
-      } else {
-        showStatus('error', 'Login failed. Please try again.');
-      }
-    } finally {
+      console.error("Auth Initiation Error:", error);
+      showStatus('error', `Login failed: ${error.code || error.message}`);
       setAuthLoading(false);
     }
   };
@@ -166,11 +149,16 @@ const App = () => {
         const email = result.user.email.toLowerCase();
         if (!email.endsWith('@saahas.org')) {
           signOut(auth);
-          showStatus('error', 'Access Restricted to @saahas.org');
+          showStatus('error', 'Access Restricted: Only @saahas.org emails allowed.');
+        } else {
+            showStatus('success', 'Authenticated! Checking permissions...');
         }
       }
     }).catch(err => {
-      if (err.code !== 'auth/no-auth-event') console.error(err);
+      if (err.code !== 'auth/no-auth-event') {
+        console.error("Redirect Result Error:", err);
+        showStatus('error', `Authentication error: ${err.code}`);
+      }
     });
   }, []);
 
@@ -235,7 +223,7 @@ const App = () => {
   const showStatus = (type, text) => {
     setStatusMsg({ type, text: String(text) });
     if (type !== 'info') {
-        setTimeout(() => setStatusMsg({ type: '', text: '' }), 6000);
+        setTimeout(() => setStatusMsg({ type: '', text: '' }), 8000);
     }
   };
 
@@ -246,7 +234,7 @@ const App = () => {
       await setDoc(configRef, newConfig);
       showStatus('success', 'Project settings updated!');
     } catch (e) {
-      showStatus('error', 'Update failed.');
+      showStatus('error', 'Update failed. Check manager permissions.');
     }
   };
 
@@ -255,7 +243,7 @@ const App = () => {
     try {
       const roleRef = doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', email.toLowerCase().trim());
       await setDoc(roleRef, { role, updatedAt: new Date().toISOString() });
-      showStatus('success', `Role assigned to ${email}`);
+      showStatus('success', `${email} set as ${role}`);
     } catch (e) {
       showStatus('error', 'Role update failed.');
     }
@@ -294,14 +282,14 @@ const App = () => {
         timestamp: new Date().toISOString(),
         enteredBy: user.email
       });
-      showStatus('success', `Data saved for ${block.name}`);
+      showStatus('success', `Report saved for ${block.name}`);
       setFormData({ ...formData, hhCovered: 0, hhGiving: 0, hhSegregating: 0, noCollection: false });
     } catch (e) {
-      showStatus('error', "Database error.");
+      showStatus('error', "Database connection error.");
     }
   };
 
-  // --- Analytical Computations ---
+  // --- Analytics & Review ---
   const filteredLogs = useMemo(() => {
     return dailyData.filter(log => {
       const wardMatch = dashWard === 'all' || log.wardId === dashWard;
@@ -335,21 +323,21 @@ const App = () => {
       }
 
       if (!groups[key]) {
-        groups[key] = { name: label, giving: 0, seg: 0, rawDate: log.date };
+        groups[key] = { name: label, giving: 0, seg: 0, covered: 0, rawDate: log.date };
       }
       
+      groups[key].covered += Number(log.hhCovered || 0);
       if (!log.noCollection) {
         groups[key].giving += Number(log.hhGiving || 0);
         groups[key].seg += Number(log.hhSegregating || 0);
       }
     });
-    // Strict chronological sort prevents tooltip duplicates
     return Object.values(groups).sort((a, b) => a.rawDate.localeCompare(b.rawDate));
   }, [filteredLogs, viewTimeframe]);
 
   const handleExportCSV = () => {
     const exportLogs = dailyData.filter(l => l.date >= exportStart && l.date <= exportEnd);
-    if (exportLogs.length === 0) { showStatus('error', 'No data found.'); return; }
+    if (exportLogs.length === 0) { showStatus('error', 'No data to export.'); return; }
 
     const headers = ["Reporting Date", "Ward", "Block", "Supervisor", "HH Covered", "Giving Waste", "Segregating", "Status", "Reason"];
     const logRows = exportLogs.sort((a,b) => a.date.localeCompare(b.date)).map(l => [
@@ -358,7 +346,6 @@ const App = () => {
       l.noCollection ? "Absent" : "Collected", l.noCollection ? `"${l.reason}"` : ""
     ]);
 
-    // Period Formatting
     const calculateStats = (data) => {
       const cov = data.reduce((s,l) => s + Number(l.hhCovered || 0), 0);
       const giv = data.reduce((s,l) => s + (l.noCollection ? 0 : Number(l.hhGiving || 0)), 0);
@@ -371,7 +358,7 @@ const App = () => {
 
     const getPeriodKey = (dateStr, type) => {
       const d = new Date(dateStr);
-      if (type === 'W') return `Week Starting ${new Date(d.setDate(d.getDate() - d.getDay())).toISOString().split('T')[0]}`;
+      if (type === 'W') return `W/O ${new Date(d.setDate(d.getDate() - d.getDay())).toISOString().split('T')[0]}`;
       if (type === 'M') return `${d.toLocaleString('default', { month: 'long' })} ${d.getFullYear()}`;
       if (type === 'Q') return `Q${Math.floor(d.getMonth() / 3) + 1} ${d.getFullYear()}`;
       if (type === 'Y') return `${d.getFullYear()}`;
@@ -390,28 +377,30 @@ const App = () => {
       });
     };
 
-    const summaryHeader = ["Summary Period", "Avg Giving %", "Avg Segregation %"];
-    const csvContent = [
-      headers, ...logRows, [], ["PERIODICAL ANALYSIS"], summaryHeader,
-      ...aggregate('W').map(r => ["Weekly", ...r]),
-      ...aggregate('M').map(r => ["Monthly", ...r]),
-      ...aggregate('Q').map(r => ["Quarterly", ...r]),
-      ...aggregate('Y').map(r => ["Yearly", ...r])
-    ].map(e => e.join(",")).join("\n");
+    const summaryHeader = ["Summary Period", "Avg Giving (%)", "Avg Segregation (%)"];
+    const summaries = [
+      ...aggregate('W').map(r => ["Weekly Average", ...r]),
+      ...aggregate('M').map(r => ["Monthly Average", ...r]),
+      ...aggregate('Q').map(r => ["Quarterly Average", ...r]),
+      ...aggregate('Y').map(r => ["Yearly Average", ...r])
+    ];
+
+    const csvContent = [headers, ...logRows, [], ["PERIODICAL AGGREGATES"], summaryHeader, ...summaries]
+      .map(e => e.join(",")).join("\n");
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
     link.download = `Saahas_SWM_Report_${exportStart}_to_${exportEnd}.csv`;
     link.click();
-    showStatus('success', 'Report Exported.');
+    showStatus('success', 'Report Downloaded.');
   };
 
   // --- Views ---
-  if (loading) return (
+  if (loading || (user && userRole === null)) return (
     <div className="flex flex-col items-center justify-center h-screen bg-slate-50 gap-4">
       <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-      <p className="text-slate-500 font-medium">Bootstrapping Saahas SWM...</p>
+      <p className="text-slate-500 font-medium">Authorizing Secure Access...</p>
     </div>
   );
 
@@ -426,7 +415,7 @@ const App = () => {
         <div className="bg-blue-50 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto text-blue-600"><Globe size={40} /></div>
         <div className="text-center">
           <h1 className="text-3xl font-black text-slate-800">Saahas SWM</h1>
-          <p className="text-slate-500 mt-2 font-medium">Secure Organization Portal</p>
+          <p className="text-slate-500 mt-2 font-medium">Organization Portal</p>
         </div>
         <div className="space-y-4">
           <button 
@@ -437,9 +426,11 @@ const App = () => {
             {authLoading ? <Loader2 className="animate-spin" size={20} /> : <LogIn size={20} />}
             {authLoading ? 'Connecting...' : 'Sign in with Saahas Email'}
           </button>
-          <p className="text-[10px] text-center text-slate-400 font-bold uppercase tracking-widest leading-relaxed px-4">
-            If login window closes immediately, ensure your browser is not blocking popups.
-          </p>
+          <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
+             <p className="text-[10px] text-center text-slate-500 font-bold uppercase tracking-widest leading-relaxed">
+               Note: If the window closes immediately, please ensure your Vercel domain is added to Firebase Authorized Domains.
+             </p>
+          </div>
         </div>
       </div>
     </div>
@@ -456,14 +447,14 @@ const App = () => {
     <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
       <div className="max-w-md w-full bg-white p-10 rounded-[40px] shadow-2xl text-center space-y-6">
         <AlertCircle size={64} className="text-red-500 mx-auto" />
-        <h1 className="text-2xl font-black text-slate-800">Access Restricted</h1>
-        <p className="text-slate-500 font-medium">Email <b>{user.email}</b> is authenticated but not whitelisted in the SWM Tracker. Please contact your Project Manager.</p>
-        <button onClick={handleLogout} className="text-blue-600 font-bold hover:underline flex items-center gap-2 mx-auto"><LogOut size={16}/> Sign out & Try Different Account</button>
+        <h1 className="text-2xl font-black text-slate-800">Account Restricted</h1>
+        <p className="text-slate-500 font-medium">Your email <b>{user.email}</b> is authenticated but not whitelisted. Please contact your Manager.</p>
+        <button onClick={handleLogout} className="text-blue-600 font-bold hover:underline">Sign out & Try Different Account</button>
       </div>
     </div>
   );
 
-  const stats = {
+  const statsSummary = {
     covered: filteredLogs.reduce((s, v) => s + Number(v.hhCovered || 0), 0),
     giving: filteredLogs.reduce((s, v) => s + (v.noCollection ? 0 : Number(v.hhGiving || 0)), 0),
     seg: filteredLogs.reduce((s, v) => s + (v.noCollection ? 0 : Number(v.hhSegregating || 0)), 0),
@@ -472,16 +463,6 @@ const App = () => {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans pb-20 md:pb-0 flex flex-col md:flex-row">
-      {statusMsg.text && (
-        <div className={`fixed top-4 right-4 z-[100] p-4 rounded-xl shadow-2xl flex items-center gap-3 animate-in slide-in-from-top-4 ${
-          statusMsg.type === 'success' ? 'bg-green-600 text-white' : 'bg-red-600 text-white'
-        }`}>
-          {statusMsg.type === 'success' ? <CheckCircle2 size={20} /> : <AlertCircle size={20} />}
-          <span className="font-semibold">{statusMsg.text}</span>
-        </div>
-      )}
-
-      {/* Sidebar Nav */}
       <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 flex justify-around p-2 z-50 md:sticky md:top-0 md:flex-col md:w-64 md:h-screen md:justify-start md:gap-2 md:p-6 shadow-sm">
         <div className="hidden md:flex p-2 font-black text-2xl text-blue-600 mb-8 items-center gap-3"><Globe size={32} /> <span>Saahas SWM</span></div>
         {(userRole === 'manager' || userRole === 'coordinator') && (
@@ -502,20 +483,17 @@ const App = () => {
             <Settings size={20} /> <span className="text-[10px] md:text-base">Setup</span>
           </button>
         )}
-        <div className="mt-auto hidden md:block pt-6 border-t border-slate-100">
-          <div className="flex items-center gap-3 px-4 py-2 mb-4">
-            <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold text-xs">{user?.email?.[0].toUpperCase()}</div>
-            <div className="flex flex-col"><span className="text-xs font-black text-slate-700 truncate max-w-[120px]">{user?.email?.split('@')[0]}</span><span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">{userRole}</span></div>
-          </div>
-          <button onClick={handleLogout} className="w-full flex items-center gap-3 px-4 py-3 text-red-500 font-bold hover:bg-red-50 rounded-2xl transition"><LogOut size={18} /> Sign Out</button>
+        <div className="mt-auto hidden md:block pt-6 border-t border-slate-100 text-center">
+          <button onClick={handleLogout} className="w-full flex items-center gap-3 px-4 py-3 text-red-500 font-bold hover:bg-red-50 rounded-2xl transition"><LogOut size={18} /> Logout</button>
         </div>
       </nav>
 
       <main className="flex-1 pt-6 px-4 md:pt-10 md:px-10 max-w-7xl overflow-x-hidden">
+        {/* DASHBOARD */}
         {activeTab === 'dashboard' && (
           <div className="space-y-6 animate-in fade-in duration-500">
             <header className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
-              <div><h1 className="text-3xl font-bold tracking-tight text-slate-800">Operational Dashboard</h1><p className="text-slate-500 font-medium">Real-time performance metrics</p></div>
+              <div><h1 className="text-3xl font-bold tracking-tight text-slate-800">Operational Analytics</h1><p className="text-slate-500 font-medium">India SWM performance tracking</p></div>
               <div className="bg-white p-4 rounded-[28px] border border-slate-200 shadow-sm flex flex-col sm:flex-row items-center gap-4">
                 <div className="flex items-center gap-2">
                   <input type="date" className="bg-slate-50 border-none rounded-lg p-1.5 text-[11px] font-bold outline-none" value={exportStart} onChange={e => setExportStart(e.target.value)} />
@@ -531,7 +509,7 @@ const App = () => {
             <div className="bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 items-end">
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Ward</label>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Ward Mapping</label>
                   <select className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-sm outline-none font-semibold" value={dashWard} onChange={(e) => {setDashWard(e.target.value); setDashBlocks([]);}}>
                     <option value="all">All Wards</option>
                     {config.wards?.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
@@ -548,7 +526,7 @@ const App = () => {
                   </div>
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">View</label>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Analysis Period</label>
                   <div className="flex bg-slate-50 border border-slate-200 rounded-xl p-1 gap-1">
                     {['daily', 'weekly', 'monthly'].map(t => (<button key={t} onClick={() => setViewTimeframe(t)} className={`flex-1 py-1.5 rounded-lg text-[10px] font-black capitalize transition ${viewTimeframe === t ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'}`}>{t}</button>))}
                   </div>
@@ -563,19 +541,19 @@ const App = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-blue-50 text-blue-600 p-4 rounded-2xl"><Users size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Service Area</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.covered.toLocaleString()}</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">HH Area</p><p className="text-2xl font-black text-slate-800 leading-tight">{statsSummary.covered.toLocaleString()}</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-indigo-50 text-indigo-600 p-4 rounded-2xl"><Truck size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">participation</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.covered > 0 ? (stats.giving/stats.covered*100).toFixed(1) : 0)}%</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Participation</p><p className="text-2xl font-black text-slate-800 leading-tight">{(statsSummary.covered > 0 ? (statsSummary.giving/statsSummary.covered*100).toFixed(1) : 0)}%</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-green-50 text-green-600 p-4 rounded-2xl"><CheckCircle2 size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Efficiency</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.giving > 0 ? ((stats.seg / stats.giving) * 100).toFixed(1) : 0)}%</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Efficiency</p><p className="text-2xl font-black text-slate-800 leading-tight">{(statsSummary.giving > 0 ? ((statsSummary.seg / statsSummary.giving) * 100).toFixed(1) : 0)}%</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-red-50 text-red-600 p-4 rounded-2xl"><Ban size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Absences</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.absences}</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Absences</p><p className="text-2xl font-black text-slate-800 leading-tight">{statsSummary.absences}</p></div>
               </div>
             </div>
 
@@ -592,9 +570,12 @@ const App = () => {
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                       <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94a3b8'}} />
                       <YAxis axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94a3b8'}} />
-                      <Tooltip contentStyle={{ borderRadius: '20px', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)' }} labelStyle={{ fontSize: '14px', fontWeight: '900', color: '#1e293b' }} />
+                      <Tooltip 
+                        contentStyle={{ borderRadius: '20px', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)' }}
+                        labelStyle={{ fontSize: '14px', fontWeight: '900', color: '#1e293b' }}
+                      />
                       <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} />
-                      <Area type="monotone" dataKey="giving" name="Giving Waste" stroke="#3b82f6" strokeWidth={4} fillOpacity={1} fill="url(#colorGiving)" />
+                      <Area type="monotone" dataKey="giving" name="Collection" stroke="#3b82f6" strokeWidth={4} fillOpacity={1} fill="url(#colorGiving)" />
                       <Area type="monotone" dataKey="seg" name="Segregation" stroke="#a855f7" strokeWidth={4} fillOpacity={1} fill="url(#colorSeg)" />
                     </AreaChart>
                   </ResponsiveContainer>
@@ -605,7 +586,7 @@ const App = () => {
                 {gapData.length > 0 ? (
                   <div className="h-80"><ResponsiveContainer width="100%" height="100%"><BarChart data={gapData} layout="vertical"><CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f1f5f9" /><XAxis type="number" hide /><YAxis dataKey="name" type="category" axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#64748b', fontWeight: 'bold'}} width={120} /><Tooltip cursor={{fill: '#f8fafc'}} contentStyle={{ borderRadius: '15px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} /><Bar dataKey="value" name="Incidents" radius={[0, 10, 10, 0]}>{gapData.map((_, index) => <Cell key={index} fill={['#ef4444', '#f97316', '#f59e0b', '#84cc16'][index % 4]} />)}</Bar></BarChart></ResponsiveContainer></div>
                 ) : (
-                  <div className="h-full flex flex-col items-center justify-center text-center opacity-30"><CheckCircle2 size={64} className="text-green-500"/><p className="font-bold text-sm mt-3">All Active!</p></div>
+                  <div className="h-full flex flex-col items-center justify-center text-center opacity-30"><CheckCircle2 size={64} className="text-green-500"/><p className="font-bold text-sm mt-3">All Operational!</p></div>
                 )}
               </div>
             </div>
@@ -616,14 +597,14 @@ const App = () => {
         {activeTab === 'review' && (
           <div className="space-y-6 animate-in slide-in-from-bottom-6">
             <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div><h1 className="text-3xl font-black text-slate-800">Raw Data Audit</h1><p className="text-slate-500 font-medium">Daily operational review</p></div>
+              <div><h1 className="text-3xl font-black text-slate-800">Raw Data Audit</h1><p className="text-slate-500 font-medium">Operational entry review</p></div>
               <div className="flex items-center gap-2 bg-white p-2 rounded-2xl border border-slate-200 shadow-sm"><input type="date" className="bg-transparent border-none p-1 font-bold text-xs" value={reviewStart} onChange={e => setReviewStart(e.target.value)} /><ArrowRight size={14} className="text-slate-300" /><input type="date" className="bg-transparent border-none p-1 font-bold text-xs" value={reviewEnd} onChange={e => setReviewEnd(e.target.value)} /></div>
             </header>
             <div className="bg-white rounded-[40px] shadow-sm border border-slate-100 overflow-hidden mb-12">
               <div className="overflow-x-auto">
                 <table className="w-full text-left">
                   <thead className="bg-slate-50 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                    <tr><th className="px-8 py-5">Date</th><th className="px-6 py-5">Block</th><th className="px-6 py-5">Status</th><th className="px-6 py-5 text-center">Covered</th><th className="px-6 py-5 text-center">Waste Given</th><th className="px-6 py-5 text-center">Waste Segregated</th><th className="px-6 py-5">Given Percentage</th><th className="px-6 py-5">Segregated Percentage</th></tr>
+                    <tr><th className="px-8 py-5">Date</th><th className="px-6 py-5">Block</th><th className="px-6 py-5">Status</th><th className="px-6 py-5 text-center">Covered</th><th className="px-6 py-5 text-center">Waste Given</th><th className="px-6 py-5 text-center">Waste Segregated</th><th className="px-6 py-5">Given %</th><th className="px-6 py-5">Segregated %</th></tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
                     {reviewTableData.map((l, i) => {
@@ -649,6 +630,7 @@ const App = () => {
           </div>
         )}
 
+        {/* DATA ENTRY */}
         {activeTab === 'entry' && (
           <div className="max-w-xl mx-auto py-6 animate-in slide-in-from-bottom-6">
             <header className="text-center mb-8"><h1 className="text-2xl font-black text-slate-800">Field Submission</h1></header>
@@ -690,6 +672,7 @@ const App = () => {
           </div>
         )}
 
+        {/* SETUP */}
         {activeTab === 'setup' && (
           <div className="max-w-4xl mx-auto py-6 space-y-8 animate-in slide-in-from-bottom-6">
             <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800">Operational Hierarchy</h1></header>
