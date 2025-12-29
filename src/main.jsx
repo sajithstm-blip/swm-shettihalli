@@ -3,10 +3,9 @@ import ReactDOM from 'react-dom/client';
 import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
-  signInWithPopup, 
-  signInWithRedirect,
-  getRedirectResult,
-  GoogleAuthProvider, 
+  sendSignInLinkToEmail,
+  isSignInWithEmailLink,
+  signInWithEmailLink,
   onAuthStateChanged,
   signOut 
 } from 'firebase/auth';
@@ -48,7 +47,6 @@ import {
   Database,
   Send,
   Loader2,
-  LogIn,
   RefreshCw
 } from 'lucide-react';
 
@@ -71,16 +69,15 @@ const firebaseConfig = isCanvas
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const googleProvider = new GoogleAuthProvider();
-googleProvider.setCustomParameters({ prompt: 'select_account' });
-
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'swm-national-v1'; 
 
 const formatDate = (date) => date.toISOString().split('T')[0];
 
 const App = () => {
   const [user, setUser] = useState(null);
-  const [userRole, setUserRole] = useState(null); 
+  const [userRole, setUserRole] = useState(null); // 'manager', 'coordinator', 'supervisor'
+  const [emailInput, setEmailInput] = useState('');
+  const [isLinkSent, setIsLinkSent] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
   const [roleLoading, setRoleLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -121,16 +118,32 @@ const App = () => {
     reason: "Vehicle didn't come"
   });
 
-  // --- Auth Logic: Restricted Google Sign-In with Redirect Fallback ---
-  const handleGoogleLogin = async () => {
+  // --- Auth Logic: Passwordless Email Link ---
+  const handleSendLink = async (e) => {
+    e.preventDefault();
+    const cleanEmail = emailInput.trim().toLowerCase();
+    
+    if (!cleanEmail.endsWith('@saahas.org')) {
+      showStatus('error', 'Only @saahas.org emails allowed.');
+      return;
+    }
+
     setAuthLoading(true);
-    showStatus('info', 'Connecting to Google...');
+    const actionCodeSettings = {
+      // Must exactly match the Vercel URL or the URL the user is on
+      url: window.location.origin + window.location.pathname,
+      handleCodeInApp: true,
+    };
+
     try {
-      // Use Redirect for better compatibility with Vercel and iFrames
-      await signInWithRedirect(auth, googleProvider);
+      await sendSignInLinkToEmail(auth, cleanEmail, actionCodeSettings);
+      window.localStorage.setItem('emailForSignIn', cleanEmail);
+      setIsLinkSent(true);
+      showStatus('success', 'Sign-in link sent to your inbox!');
     } catch (error) {
-      console.error("Auth Initiation Error:", error);
-      showStatus('error', `Login failed: ${error.code || error.message}`);
+      console.error("Auth Error:", error);
+      showStatus('error', error.message || 'Check Firebase Console Email Link settings.');
+    } finally {
       setAuthLoading(false);
     }
   };
@@ -140,29 +153,32 @@ const App = () => {
     setUserRole(null);
     setUser(null);
     setRoleLoading(false);
+    setIsLinkSent(false);
   };
 
-  // Sync redirect results on mount
   useEffect(() => {
-    getRedirectResult(auth).then((result) => {
-      if (result?.user) {
-        const email = result.user.email.toLowerCase();
-        if (!email.endsWith('@saahas.org')) {
-          signOut(auth);
-          showStatus('error', 'Access Restricted: Only @saahas.org emails allowed.');
-        } else {
-            showStatus('success', 'Authenticated! Checking permissions...');
-        }
+    // 1. Detect magic link arrival
+    if (isSignInWithEmailLink(auth, window.location.href)) {
+      let email = window.localStorage.getItem('emailForSignIn');
+      if (!email) {
+        email = window.prompt('Please confirm your @saahas.org email address:');
       }
-    }).catch(err => {
-      if (err.code !== 'auth/no-auth-event') {
-        console.error("Redirect Result Error:", err);
-        showStatus('error', `Authentication error: ${err.code}`);
+      if (email) {
+        setRoleLoading(true);
+        signInWithEmailLink(auth, email, window.location.href)
+          .then(() => {
+            window.localStorage.removeItem('emailForSignIn');
+            window.history.replaceState(null, null, window.location.origin + window.location.pathname);
+            showStatus('success', 'Login successful!');
+          })
+          .catch((err) => {
+            showStatus('error', 'Link expired or used. Get a new link.');
+            setRoleLoading(false);
+          });
       }
-    });
-  }, []);
+    }
 
-  useEffect(() => {
+    // 2. Auth State and Role Sync
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
       if (u) {
         setUser(u);
@@ -186,7 +202,6 @@ const App = () => {
       } else {
         setUser(null);
         setUserRole(null);
-        setRoleLoading(false);
       }
       setLoading(false);
     });
@@ -219,11 +234,11 @@ const App = () => {
     return () => { unsubConfig(); unsubData(); };
   }, [user, userRole]);
 
-  // --- UI Helpers ---
+  // --- Helpers ---
   const showStatus = (type, text) => {
     setStatusMsg({ type, text: String(text) });
     if (type !== 'info') {
-        setTimeout(() => setStatusMsg({ type: '', text: '' }), 8000);
+        setTimeout(() => setStatusMsg({ type: '', text: '' }), 6000);
     }
   };
 
@@ -232,9 +247,9 @@ const App = () => {
     try {
       const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'app_config', 'settings');
       await setDoc(configRef, newConfig);
-      showStatus('success', 'Project settings updated!');
+      showStatus('success', 'Operational settings updated!');
     } catch (e) {
-      showStatus('error', 'Update failed. Check manager permissions.');
+      showStatus('error', 'Failed to save.');
     }
   };
 
@@ -282,14 +297,14 @@ const App = () => {
         timestamp: new Date().toISOString(),
         enteredBy: user.email
       });
-      showStatus('success', `Report saved for ${block.name}`);
+      showStatus('success', `Data saved for ${block.name}`);
       setFormData({ ...formData, hhCovered: 0, hhGiving: 0, hhSegregating: 0, noCollection: false });
     } catch (e) {
-      showStatus('error', "Database connection error.");
+      showStatus('error', "Database error.");
     }
   };
 
-  // --- Analytics & Review ---
+  // --- Analytical Computations ---
   const filteredLogs = useMemo(() => {
     return dailyData.filter(log => {
       const wardMatch = dashWard === 'all' || log.wardId === dashWard;
@@ -326,18 +341,18 @@ const App = () => {
         groups[key] = { name: label, giving: 0, seg: 0, covered: 0, rawDate: log.date };
       }
       
-      groups[key].covered += Number(log.hhCovered || 0);
       if (!log.noCollection) {
         groups[key].giving += Number(log.hhGiving || 0);
         groups[key].seg += Number(log.hhSegregating || 0);
       }
     });
+    // Strict chronological sort for graph tooltip accuracy
     return Object.values(groups).sort((a, b) => a.rawDate.localeCompare(b.rawDate));
   }, [filteredLogs, viewTimeframe]);
 
   const handleExportCSV = () => {
     const exportLogs = dailyData.filter(l => l.date >= exportStart && l.date <= exportEnd);
-    if (exportLogs.length === 0) { showStatus('error', 'No data to export.'); return; }
+    if (exportLogs.length === 0) { showStatus('error', 'No data for range.'); return; }
 
     const headers = ["Reporting Date", "Ward", "Block", "Supervisor", "HH Covered", "Giving Waste", "Segregating", "Status", "Reason"];
     const logRows = exportLogs.sort((a,b) => a.date.localeCompare(b.date)).map(l => [
@@ -358,7 +373,7 @@ const App = () => {
 
     const getPeriodKey = (dateStr, type) => {
       const d = new Date(dateStr);
-      if (type === 'W') return `W/O ${new Date(d.setDate(d.getDate() - d.getDay())).toISOString().split('T')[0]}`;
+      if (type === 'W') return `Week ${new Date(d.setDate(d.getDate() - d.getDay())).toISOString().split('T')[0]}`;
       if (type === 'M') return `${d.toLocaleString('default', { month: 'long' })} ${d.getFullYear()}`;
       if (type === 'Q') return `Q${Math.floor(d.getMonth() / 3) + 1} ${d.getFullYear()}`;
       if (type === 'Y') return `${d.getFullYear()}`;
@@ -377,30 +392,28 @@ const App = () => {
       });
     };
 
-    const summaryHeader = ["Summary Period", "Avg Giving (%)", "Avg Segregation (%)"];
-    const summaries = [
-      ...aggregate('W').map(r => ["Weekly Average", ...r]),
-      ...aggregate('M').map(r => ["Monthly Average", ...r]),
-      ...aggregate('Q').map(r => ["Quarterly Average", ...r]),
-      ...aggregate('Y').map(r => ["Yearly Average", ...r])
-    ];
-
-    const csvContent = [headers, ...logRows, [], ["PERIODICAL AGGREGATES"], summaryHeader, ...summaries]
-      .map(e => e.join(",")).join("\n");
+    const summaryHeader = ["Summary Period", "Avg Giving %", "Avg Segregation %"];
+    const csvContent = [
+      headers, ...logRows, [], ["AVERAGE PERFORMANCE SUMMARY"], summaryHeader,
+      ...aggregate('W').map(r => ["Weekly", ...r]),
+      ...aggregate('M').map(r => ["Monthly", ...r]),
+      ...aggregate('Q').map(r => ["Quarterly", ...r]),
+      ...aggregate('Y').map(r => ["Yearly", ...r])
+    ].map(e => e.join(",")).join("\n");
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `Saahas_SWM_Report_${exportStart}_to_${exportEnd}.csv`;
+    link.download = `SWM_Report_${exportStart}_to_${exportEnd}.csv`;
     link.click();
-    showStatus('success', 'Report Downloaded.');
+    showStatus('success', 'CSV Report Exported.');
   };
 
-  // --- Views ---
+  // --- Master View Switcher ---
   if (loading || (user && userRole === null)) return (
     <div className="flex flex-col items-center justify-center h-screen bg-slate-50 gap-4">
       <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-      <p className="text-slate-500 font-medium">Authorizing Secure Access...</p>
+      <p className="text-slate-500 font-medium">Validating Secure Session...</p>
     </div>
   );
 
@@ -415,23 +428,42 @@ const App = () => {
         <div className="bg-blue-50 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto text-blue-600"><Globe size={40} /></div>
         <div className="text-center">
           <h1 className="text-3xl font-black text-slate-800">Saahas SWM</h1>
-          <p className="text-slate-500 mt-2 font-medium">Organization Portal</p>
+          <p className="text-slate-500 mt-2 font-medium">Passwordless Organization Portal</p>
         </div>
-        <div className="space-y-4">
-          <button 
-            onClick={handleGoogleLogin} 
-            disabled={authLoading}
-            className="w-full bg-blue-600 text-white py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-blue-700 transition shadow-xl disabled:opacity-50"
-          >
-            {authLoading ? <Loader2 className="animate-spin" size={20} /> : <LogIn size={20} />}
-            {authLoading ? 'Connecting...' : 'Sign in with Saahas Email'}
-          </button>
-          <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
-             <p className="text-[10px] text-center text-slate-500 font-bold uppercase tracking-widest leading-relaxed">
-               Note: If the window closes immediately, please ensure your Vercel domain is added to Firebase Authorized Domains.
-             </p>
+
+        {!isLinkSent ? (
+          <form onSubmit={handleSendLink} className="space-y-4">
+            <div className="space-y-1">
+              <label className="text-[10px] font-black text-slate-400 uppercase ml-1">Work Email</label>
+              <div className="relative">
+                <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
+                <input 
+                  type="email" 
+                  placeholder="name@saahas.org" 
+                  required
+                  className="w-full pl-12 pr-4 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold outline-none focus:border-blue-500 transition"
+                  value={emailInput}
+                  onChange={e => setEmailInput(e.target.value)}
+                />
+              </div>
+            </div>
+            <button 
+              type="submit" 
+              disabled={authLoading}
+              className="w-full bg-blue-600 text-white py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-blue-700 transition shadow-xl disabled:opacity-50"
+            >
+              {authLoading ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />}
+              {authLoading ? 'Requesting Link...' : 'Get Sign-In Link'}
+            </button>
+            <p className="text-[9px] text-center text-slate-400 font-bold uppercase tracking-tighter">No password required. Login link will be sent to your email.</p>
+          </form>
+        ) : (
+          <div className="p-6 bg-green-50 border border-green-100 rounded-3xl text-center space-y-4 animate-in zoom-in-95">
+            <CheckCircle2 size={48} className="text-green-500 mx-auto" />
+            <p className="font-bold text-green-800 leading-tight">Magic link sent to <b>{emailInput}</b>. Check your inbox to complete sign-in without a password.</p>
+            <button onClick={() => setIsLinkSent(false)} className="text-xs font-bold text-green-600 underline">Enter a different email</button>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );
@@ -439,7 +471,7 @@ const App = () => {
   if (roleLoading) return (
     <div className="flex flex-col items-center justify-center h-screen bg-slate-50 gap-4">
       <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-      <p className="text-slate-500 font-medium">Authentication Verified. <br/>Checking permissions for {user.email}...</p>
+      <p className="text-slate-500 font-medium text-center">Session Verified. <br/>Checking permissions for {user.email}...</p>
     </div>
   );
 
@@ -447,14 +479,14 @@ const App = () => {
     <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
       <div className="max-w-md w-full bg-white p-10 rounded-[40px] shadow-2xl text-center space-y-6">
         <AlertCircle size={64} className="text-red-500 mx-auto" />
-        <h1 className="text-2xl font-black text-slate-800">Account Restricted</h1>
-        <p className="text-slate-500 font-medium">Your email <b>{user.email}</b> is authenticated but not whitelisted. Please contact your Manager.</p>
-        <button onClick={handleLogout} className="text-blue-600 font-bold hover:underline">Sign out & Try Different Account</button>
+        <h1 className="text-2xl font-black text-slate-800">Access Restricted</h1>
+        <p className="text-slate-500 font-medium">Your email <b>{user.email}</b> is not authorized. Please contact your Project Manager to enable your account.</p>
+        <button onClick={handleLogout} className="text-blue-600 font-bold hover:underline">Log Out & Change Account</button>
       </div>
     </div>
   );
 
-  const statsSummary = {
+  const stats = {
     covered: filteredLogs.reduce((s, v) => s + Number(v.hhCovered || 0), 0),
     giving: filteredLogs.reduce((s, v) => s + (v.noCollection ? 0 : Number(v.hhGiving || 0)), 0),
     seg: filteredLogs.reduce((s, v) => s + (v.noCollection ? 0 : Number(v.hhSegregating || 0)), 0),
@@ -483,7 +515,11 @@ const App = () => {
             <Settings size={20} /> <span className="text-[10px] md:text-base">Setup</span>
           </button>
         )}
-        <div className="mt-auto hidden md:block pt-6 border-t border-slate-100 text-center">
+        <div className="mt-auto hidden md:block pt-6 border-t border-slate-100">
+          <div className="flex items-center gap-3 px-4 py-2 mb-4">
+            <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold text-xs">{user?.email?.[0].toUpperCase()}</div>
+            <div className="flex flex-col"><span className="text-xs font-black text-slate-700 truncate max-w-[120px]">{user?.email?.split('@')[0]}</span><span className="text-[9px] font-bold text-slate-400 uppercase">{userRole}</span></div>
+          </div>
           <button onClick={handleLogout} className="w-full flex items-center gap-3 px-4 py-3 text-red-500 font-bold hover:bg-red-50 rounded-2xl transition"><LogOut size={18} /> Logout</button>
         </div>
       </nav>
@@ -526,7 +562,7 @@ const App = () => {
                   </div>
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Analysis Period</label>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Scale</label>
                   <div className="flex bg-slate-50 border border-slate-200 rounded-xl p-1 gap-1">
                     {['daily', 'weekly', 'monthly'].map(t => (<button key={t} onClick={() => setViewTimeframe(t)} className={`flex-1 py-1.5 rounded-lg text-[10px] font-black capitalize transition ${viewTimeframe === t ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'}`}>{t}</button>))}
                   </div>
@@ -541,19 +577,19 @@ const App = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-blue-50 text-blue-600 p-4 rounded-2xl"><Users size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">HH Area</p><p className="text-2xl font-black text-slate-800 leading-tight">{statsSummary.covered.toLocaleString()}</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">HH Area</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.covered.toLocaleString()}</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-indigo-50 text-indigo-600 p-4 rounded-2xl"><Truck size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Participation</p><p className="text-2xl font-black text-slate-800 leading-tight">{(statsSummary.covered > 0 ? (statsSummary.giving/statsSummary.covered*100).toFixed(1) : 0)}%</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">participation</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.covered > 0 ? (stats.giving/stats.covered*100).toFixed(1) : 0)}%</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-green-50 text-green-600 p-4 rounded-2xl"><CheckCircle2 size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Efficiency</p><p className="text-2xl font-black text-slate-800 leading-tight">{(statsSummary.giving > 0 ? ((statsSummary.seg / statsSummary.giving) * 100).toFixed(1) : 0)}%</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Efficiency</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.giving > 0 ? ((stats.seg / stats.giving) * 100).toFixed(1) : 0)}%</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-red-50 text-red-600 p-4 rounded-2xl"><Ban size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Absences</p><p className="text-2xl font-black text-slate-800 leading-tight">{statsSummary.absences}</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">Absences</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.absences}</p></div>
               </div>
             </div>
 
@@ -575,7 +611,7 @@ const App = () => {
                         labelStyle={{ fontSize: '14px', fontWeight: '900', color: '#1e293b' }}
                       />
                       <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} />
-                      <Area type="monotone" dataKey="giving" name="Collection" stroke="#3b82f6" strokeWidth={4} fillOpacity={1} fill="url(#colorGiving)" />
+                      <Area type="monotone" dataKey="giving" name="Giving Waste" stroke="#3b82f6" strokeWidth={4} fillOpacity={1} fill="url(#colorGiving)" />
                       <Area type="monotone" dataKey="seg" name="Segregation" stroke="#a855f7" strokeWidth={4} fillOpacity={1} fill="url(#colorSeg)" />
                     </AreaChart>
                   </ResponsiveContainer>
@@ -586,7 +622,7 @@ const App = () => {
                 {gapData.length > 0 ? (
                   <div className="h-80"><ResponsiveContainer width="100%" height="100%"><BarChart data={gapData} layout="vertical"><CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f1f5f9" /><XAxis type="number" hide /><YAxis dataKey="name" type="category" axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#64748b', fontWeight: 'bold'}} width={120} /><Tooltip cursor={{fill: '#f8fafc'}} contentStyle={{ borderRadius: '15px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} /><Bar dataKey="value" name="Incidents" radius={[0, 10, 10, 0]}>{gapData.map((_, index) => <Cell key={index} fill={['#ef4444', '#f97316', '#f59e0b', '#84cc16'][index % 4]} />)}</Bar></BarChart></ResponsiveContainer></div>
                 ) : (
-                  <div className="h-full flex flex-col items-center justify-center text-center opacity-30"><CheckCircle2 size={64} className="text-green-500"/><p className="font-bold text-sm mt-3">All Operational!</p></div>
+                  <div className="h-full flex flex-col items-center justify-center text-center opacity-30"><CheckCircle2 size={64} className="text-green-500"/><p className="font-bold text-sm mt-3">All Active!</p></div>
                 )}
               </div>
             </div>
@@ -597,7 +633,7 @@ const App = () => {
         {activeTab === 'review' && (
           <div className="space-y-6 animate-in slide-in-from-bottom-6">
             <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div><h1 className="text-3xl font-black text-slate-800">Raw Data Audit</h1><p className="text-slate-500 font-medium">Operational entry review</p></div>
+              <div><h1 className="text-3xl font-black text-slate-800">Raw Data Audit</h1><p className="text-slate-500 font-medium">Daily operational review</p></div>
               <div className="flex items-center gap-2 bg-white p-2 rounded-2xl border border-slate-200 shadow-sm"><input type="date" className="bg-transparent border-none p-1 font-bold text-xs" value={reviewStart} onChange={e => setReviewStart(e.target.value)} /><ArrowRight size={14} className="text-slate-300" /><input type="date" className="bg-transparent border-none p-1 font-bold text-xs" value={reviewEnd} onChange={e => setReviewEnd(e.target.value)} /></div>
             </header>
             <div className="bg-white rounded-[40px] shadow-sm border border-slate-100 overflow-hidden mb-12">
@@ -633,7 +669,7 @@ const App = () => {
         {/* DATA ENTRY */}
         {activeTab === 'entry' && (
           <div className="max-w-xl mx-auto py-6 animate-in slide-in-from-bottom-6">
-            <header className="text-center mb-8"><h1 className="text-2xl font-black text-slate-800">Field Submission</h1></header>
+            <header className="text-center mb-8"><h1 className="text-2xl font-black text-slate-800">Field Data Submission</h1></header>
             <div className="bg-white p-8 rounded-[40px] shadow-2xl border border-slate-100 space-y-6">
               <div className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
@@ -672,12 +708,11 @@ const App = () => {
           </div>
         )}
 
-        {/* SETUP */}
         {activeTab === 'setup' && (
           <div className="max-w-4xl mx-auto py-6 space-y-8 animate-in slide-in-from-bottom-6">
             <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800">Operational Hierarchy</h1></header>
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><ShieldCheck className="text-blue-500"/> Team Access Mapping</h3></div>
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><ShieldCheck className="text-blue-500"/> Account Access Mapping</h3></div>
               <div className="grid grid-cols-1 gap-4"><div className="flex flex-col sm:flex-row gap-2"><input id="new-user-email" placeholder="staff@saahas.org" className="flex-1 bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none" /><select id="new-user-role" className="bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none"><option value="supervisor">Supervisor</option><option value="coordinator">Coordinator</option><option value="manager">Manager</option></select><button onClick={() => { const em = document.getElementById('new-user-email').value; const rl = document.getElementById('new-user-role').value; if(em) updateUserRole(em, rl); }} className="bg-blue-600 text-white px-6 py-3 rounded-xl font-black">Authorize</button></div></div>
             </section>
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
