@@ -45,7 +45,8 @@ import {
   ShieldCheck,
   Table as TableIcon,
   Database,
-  Send
+  Send,
+  Loader2
 } from 'lucide-react';
 
 /**
@@ -76,6 +77,7 @@ const App = () => {
   const [userRole, setUserRole] = useState(null); // 'manager', 'coordinator', 'supervisor'
   const [emailInput, setEmailInput] = useState('');
   const [isLinkSent, setIsLinkSent] = useState(false);
+  const [authLoading, setAuthLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [config, setConfig] = useState({ 
     states: [], wards: [], blocks: [], supervisors: [] 
@@ -117,24 +119,29 @@ const App = () => {
   // --- Auth Logic: Passwordless Email Link ---
   const handleSendLink = async (e) => {
     e.preventDefault();
-    if (!emailInput.toLowerCase().endsWith('@saahas.org')) {
-      showStatus('error', 'Only @saahas.org emails are permitted.');
+    const cleanEmail = emailInput.trim().toLowerCase();
+    
+    if (!cleanEmail.endsWith('@saahas.org')) {
+      showStatus('error', 'Please use your official @saahas.org email.');
       return;
     }
 
+    setAuthLoading(true);
     const actionCodeSettings = {
       url: window.location.origin + window.location.pathname,
       handleCodeInApp: true,
     };
 
     try {
-      await sendSignInLinkToEmail(auth, emailInput, actionCodeSettings);
-      window.localStorage.setItem('emailForSignIn', emailInput);
+      await sendSignInLinkToEmail(auth, cleanEmail, actionCodeSettings);
+      window.localStorage.setItem('emailForSignIn', cleanEmail);
       setIsLinkSent(true);
-      showStatus('success', 'Check your inbox for the login link!');
+      showStatus('success', 'Authentication link sent!');
     } catch (error) {
-      console.error(error);
-      showStatus('error', 'Failed to send link. Verify Firebase Email Link settings.');
+      console.error("Auth Error:", error);
+      showStatus('error', error.message || 'Failed to send link. Is Email Link enabled in Firebase?');
+    } finally {
+      setAuthLoading(false);
     }
   };
 
@@ -144,11 +151,11 @@ const App = () => {
   };
 
   useEffect(() => {
-    // 1. Handle Link Arrival
+    // 1. Handle Sign-in Link Result
     if (isSignInWithEmailLink(auth, window.location.href)) {
       let email = window.localStorage.getItem('emailForSignIn');
       if (!email) {
-        email = window.prompt('Please confirm your @saahas.org email');
+        email = window.prompt('Please confirm your @saahas.org email address');
       }
       if (email) {
         signInWithEmailLink(auth, email, window.location.href)
@@ -158,12 +165,12 @@ const App = () => {
             showStatus('success', 'Logged in successfully!');
           })
           .catch((err) => {
-            showStatus('error', 'The sign-in link is invalid or expired.');
+            showStatus('error', 'Link expired or already used.');
           });
       }
     }
 
-    // 2. Role Monitoring
+    // 2. Monitor User State and Roles
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
       if (u) {
         setUser(u);
@@ -206,13 +213,13 @@ const App = () => {
           supervisors: data.supervisors || []
         }));
       }
-    }, (err) => showStatus('error', 'Config sync failed. Check permissions.'));
+    });
 
     const dataRef = collection(db, 'artifacts', appId, 'public', 'data', 'daily_logs');
     const unsubData = onSnapshot(query(dataRef), (snapshot) => {
       const logs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setDailyData(logs);
-    }, (err) => showStatus('error', 'Data sync failed. Check permissions.'));
+    });
 
     return () => { unsubConfig(); unsubData(); };
   }, [user, userRole]);
@@ -228,16 +235,16 @@ const App = () => {
     try {
       const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'app_config', 'settings');
       await setDoc(configRef, newConfig);
-      showStatus('success', 'Changes saved to cloud.');
+      showStatus('success', 'Project settings updated!');
     } catch (e) {
-      showStatus('error', 'Permission denied.');
+      showStatus('error', 'Save failed.');
     }
   };
 
   const updateUserRole = async (email, role) => {
     if (userRole !== 'manager') return;
     try {
-      const roleRef = doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', email.toLowerCase());
+      const roleRef = doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', email.toLowerCase().trim());
       await setDoc(roleRef, { role, updatedAt: new Date().toISOString() });
       showStatus('success', `Role assigned to ${email}`);
     } catch (e) {
@@ -285,7 +292,7 @@ const App = () => {
     }
   };
 
-  // --- Analytics & Review ---
+  // --- Analytics & Review Computations ---
   const filteredLogs = useMemo(() => {
     return dailyData.filter(log => {
       const wardMatch = dashWard === 'all' || log.wardId === dashWard;
@@ -302,6 +309,7 @@ const App = () => {
       .sort((a, b) => b.date.localeCompare(a.date));
   }, [dailyData, reviewStart, reviewEnd]);
 
+  // FIXED Graph Logic: No overlapping tooltips
   const timeSeriesData = useMemo(() => {
     const groups = {};
     filteredLogs.forEach(log => {
@@ -331,6 +339,37 @@ const App = () => {
     return Object.values(groups).sort((a, b) => a.rawDate.localeCompare(b.rawDate));
   }, [filteredLogs, viewTimeframe]);
 
+  const gapData = useMemo(() => {
+    const reasons = {};
+    filteredLogs.filter(l => l.noCollection).forEach(l => {
+      reasons[l.reason] = (reasons[l.reason] || 0) + 1;
+    });
+    return Object.entries(reasons).map(([name, value]) => ({ name, value }));
+  }, [filteredLogs]);
+
+  const performanceTable = useMemo(() => {
+    return config.blocks
+      .filter(b => (dashWard === 'all' || b.wardId === dashWard) && (dashBlocks.length === 0 || dashBlocks.includes(b.id)))
+      .map(block => {
+        const logs = filteredLogs.filter(d => d.blockId === block.id);
+        const valid = logs.filter(l => !l.noCollection);
+        const totalCovered = logs.reduce((s, l) => s + Number(l.hhCovered || 0), 0);
+        const totalGiving = valid.reduce((s, l) => s + Number(l.hhGiving || 0), 0);
+        const totalSeg = valid.reduce((s, l) => s + Number(l.hhSegregating || 0), 0);
+        const supervisor = config.supervisors.find(s => s.id === block.supervisorId);
+        return {
+          name: block.name,
+          ward: config.wards.find(w => w.id === block.wardId)?.name || 'N/A',
+          supervisor: supervisor?.name || 'Unassigned',
+          covered: totalCovered,
+          giving: totalGiving,
+          seg: totalSeg,
+          rate: totalGiving > 0 ? ((totalSeg / totalGiving) * 100).toFixed(1) : 0
+        };
+      });
+  }, [filteredLogs, config, dashWard, dashBlocks]);
+
+  // --- Executive Report Export ---
   const handleExportCSV = () => {
     const exportLogs = dailyData.filter(l => l.date >= exportStart && l.date <= exportEnd);
     if (exportLogs.length === 0) { showStatus('error', 'No data for range.'); return; }
@@ -342,7 +381,6 @@ const App = () => {
       l.noCollection ? "Absent" : "Collected", l.noCollection ? `"${l.reason}"` : ""
     ]);
 
-    // Summary Helpers
     const calculateStats = (data) => {
       const cov = data.reduce((s,l) => s + Number(l.hhCovered || 0), 0);
       const giv = data.reduce((s,l) => s + (l.noCollection ? 0 : Number(l.hhGiving || 0)), 0);
@@ -374,15 +412,15 @@ const App = () => {
       });
     };
 
-    const summaryHeader = ["Summary Type", "Period Name", "Avg Giving (%)", "Avg Segregation (%)"];
+    const summaryHeader = ["Summary Period", "Avg Giving (%)", "Avg Segregation (%)"];
     const summaries = [
-      ...aggregate('W').map(r => ["Weekly Avg", ...r]),
-      ...aggregate('M').map(r => ["Monthly Avg", ...r]),
-      ...aggregate('Q').map(r => ["Quarterly Avg", ...r]),
-      ...aggregate('Y').map(r => ["Yearly Avg", ...r])
+      ...aggregate('W').map(r => ["Weekly Average", ...r]),
+      ...aggregate('M').map(r => ["Monthly Average", ...r]),
+      ...aggregate('Q').map(r => ["Quarterly Average", ...r]),
+      ...aggregate('Y').map(r => ["Yearly Average", ...r])
     ];
 
-    const csvContent = [headers, ...logRows, [], ["PERIODICAL ANALYSIS"], summaryHeader, ...summaries]
+    const csvContent = [headers, ...logRows, [], ["AVERAGE PERFORMANCE ANALYSIS"], summaryHeader, ...summaries]
       .map(e => e.join(",")).join("\n");
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -394,10 +432,10 @@ const App = () => {
   };
 
   // --- Views ---
-  if (loading) return (
+  if (loading || (user && userRole === null)) return (
     <div className="flex flex-col items-center justify-center h-screen bg-slate-50 gap-4">
       <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-      <p className="text-slate-500 font-medium">Synchronizing Saahas SWM...</p>
+      <p className="text-slate-500 font-medium">Authenticating System...</p>
     </div>
   );
 
@@ -426,15 +464,20 @@ const App = () => {
                 />
               </div>
             </div>
-            <button type="submit" className="w-full bg-blue-600 text-white py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-blue-700 transition shadow-xl">
-              <Send size={18} /> Get Sign-In Link
+            <button 
+              type="submit" 
+              disabled={authLoading}
+              className="w-full bg-blue-600 text-white py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-blue-700 transition shadow-xl disabled:opacity-50"
+            >
+              {authLoading ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />}
+              {authLoading ? 'Sending...' : 'Get Sign-In Link'}
             </button>
           </form>
         ) : (
           <div className="p-6 bg-green-50 border border-green-100 rounded-3xl text-center space-y-4 animate-in zoom-in-95">
             <CheckCircle2 size={48} className="text-green-500 mx-auto" />
-            <p className="font-bold text-green-800">Link sent to <b>{emailInput}</b>. Check your inbox to complete sign-in.</p>
-            <button onClick={() => setIsLinkSent(false)} className="text-xs font-bold text-green-600 underline">Use a different email</button>
+            <p className="font-bold text-green-800 leading-tight">Link sent to <b>{emailInput}</b>. Please check your inbox (including Spam) to finish signing in.</p>
+            <button onClick={() => setIsLinkSent(false)} className="text-xs font-bold text-green-600 underline">Enter a different email</button>
           </div>
         )}
       </div>
@@ -446,7 +489,7 @@ const App = () => {
       <div className="max-w-md w-full bg-white p-10 rounded-[40px] shadow-2xl text-center space-y-6">
         <AlertCircle size={64} className="text-red-500 mx-auto" />
         <h1 className="text-2xl font-black text-slate-800">Access Restricted</h1>
-        <p className="text-slate-500 font-medium">Your email <b>{user.email}</b> is not authorized. Please contact your Manager.</p>
+        <p className="text-slate-500 font-medium">Your email <b>{user.email}</b> is authenticated but not authorized. Please contact your Manager.</p>
         <button onClick={handleLogout} className="text-blue-600 font-bold hover:underline">Switch Account</button>
       </div>
     </div>
@@ -481,11 +524,7 @@ const App = () => {
             <Settings size={20} /> <span className="text-[10px] md:text-base">Setup</span>
           </button>
         )}
-        <div className="mt-auto hidden md:block pt-6 border-t border-slate-100">
-          <div className="flex items-center gap-3 px-4 py-2 mb-4">
-            <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold text-xs">{user?.email?.[0]?.toUpperCase()}</div>
-            <div className="flex flex-col"><span className="text-xs font-black text-slate-700 truncate max-w-[120px]">{user?.email?.split('@')[0]}</span><span className="text-[9px] font-bold text-slate-400 uppercase">{userRole}</span></div>
-          </div>
+        <div className="mt-auto hidden md:block pt-6 border-t border-slate-100 text-center">
           <button onClick={handleLogout} className="w-full flex items-center gap-3 px-4 py-3 text-red-500 font-bold hover:bg-red-50 rounded-2xl transition"><LogOut size={18} /> Logout</button>
         </div>
       </nav>
@@ -494,7 +533,7 @@ const App = () => {
         {activeTab === 'dashboard' && (
           <div className="space-y-6 animate-in fade-in duration-500">
             <header className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
-              <div><h1 className="text-3xl font-bold tracking-tight text-slate-800">SWM Intelligence</h1><p className="text-slate-500 font-medium">Operations performance overview</p></div>
+              <div><h1 className="text-3xl font-bold tracking-tight text-slate-800">SWM Intelligence</h1><p className="text-slate-500 font-medium">Performance tracking overview</p></div>
               <div className="bg-white p-4 rounded-[28px] border border-slate-200 shadow-sm flex flex-col sm:flex-row items-center gap-4">
                 <div className="flex items-center gap-2">
                   <input type="date" className="bg-slate-50 border-none rounded-lg p-1.5 text-[11px] font-bold outline-none" value={exportStart} onChange={e => setExportStart(e.target.value)} />
@@ -510,7 +549,7 @@ const App = () => {
             <div className="bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 items-end">
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Ward</label>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Ward Selection</label>
                   <select className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-sm outline-none font-semibold" value={dashWard} onChange={(e) => {setDashWard(e.target.value); setDashBlocks([]);}}>
                     <option value="all">All Wards</option>
                     {config.wards?.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
@@ -527,7 +566,7 @@ const App = () => {
                   </div>
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">View</label>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1 text-center block">Analysis Period</label>
                   <div className="flex bg-slate-50 border border-slate-200 rounded-xl p-1 gap-1">
                     {['daily', 'weekly', 'monthly'].map(t => (<button key={t} onClick={() => setViewTimeframe(t)} className={`flex-1 py-1.5 rounded-lg text-[10px] font-black capitalize transition ${viewTimeframe === t ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'}`}>{t}</button>))}
                   </div>
@@ -546,7 +585,7 @@ const App = () => {
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-indigo-50 text-indigo-600 p-4 rounded-2xl"><Truck size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Giving Waste</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.covered > 0 ? (stats.giving/stats.covered*100).toFixed(1) : 0)}%</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Given Waste</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.covered > 0 ? (stats.giving/stats.covered*100).toFixed(1) : 0)}%</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-green-50 text-green-600 p-4 rounded-2xl"><CheckCircle2 size={28}/></div>
@@ -571,10 +610,13 @@ const App = () => {
                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                       <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94a3b8'}} />
                       <YAxis axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94a3b8'}} />
-                      <Tooltip contentStyle={{ borderRadius: '20px', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)' }} labelStyle={{ fontSize: '14px', fontWeight: '900', color: '#1e293b' }} />
+                      <Tooltip 
+                        contentStyle={{ borderRadius: '20px', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)' }}
+                        labelStyle={{ fontSize: '14px', fontWeight: '900', color: '#1e293b' }}
+                      />
                       <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} />
-                      <Area type="monotone" dataKey="giving" name="Collection" stroke="#3b82f6" strokeWidth={4} fillOpacity={1} fill="url(#colorGiving)" />
-                      <Area type="monotone" dataKey="seg" name="Segregation" stroke="#a855f7" strokeWidth={4} fillOpacity={1} fill="url(#colorSeg)" />
+                      <Area type="monotone" dataKey="giving" name="HH Giving Waste" stroke="#3b82f6" strokeWidth={4} fillOpacity={1} fill="url(#colorGiving)" />
+                      <Area type="monotone" dataKey="seg" name="HH Segregation" stroke="#a855f7" strokeWidth={4} fillOpacity={1} fill="url(#colorSeg)" />
                     </AreaChart>
                   </ResponsiveContainer>
                 </div>
@@ -601,21 +643,25 @@ const App = () => {
               <div className="overflow-x-auto">
                 <table className="w-full text-left">
                   <thead className="bg-slate-50 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                    <tr><th className="px-8 py-5">Date</th><th className="px-6 py-5">Block</th><th className="px-6 py-5">Status</th><th className="px-6 py-5 text-center">Covered</th><th className="px-6 py-5 text-center">Waste Given</th><th className="px-6 py-5 text-center">Waste Segregated</th><th className="px-6 py-5">Given %</th><th className="px-6 py-5">Segregated %</th></tr>
+                    <tr><th className="px-8 py-5">Date</th><th className="px-6 py-5">Block</th><th className="px-6 py-5">Status</th><th className="px-6 py-5 text-center">Covered</th><th className="px-6 py-5 text-center">Waste Given</th><th className="px-6 py-5 text-center">Waste Segregated</th><th className="px-6 py-5">Given Percentage</th><th className="px-6 py-5">Segregated Percentage</th></tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
-                    {reviewTableData.map((l, i) => (
-                      <tr key={i} className="hover:bg-blue-50/20 transition">
-                        <td className="px-8 py-5 font-bold text-slate-600 text-xs">{l.date}</td>
-                        <td className="px-6 py-5"><div className="font-black text-slate-700">{l.blockName}</div><div className="text-[10px] text-slate-400 font-bold">{l.supervisorName}</div></td>
-                        <td className="px-6 py-5">{l.noCollection ? <span className="px-2 py-1 bg-red-100 text-red-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Gap</span> : <span className="px-2 py-1 bg-green-100 text-green-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Active</span>}</td>
-                        <td className="px-6 py-5 font-black text-slate-700 text-center">{l.hhCovered}</td>
-                        <td className="px-6 py-5 font-black text-blue-600 text-center">{l.noCollection ? 0 : l.hhGiving}</td>
-                        <td className="px-6 py-5 font-black text-purple-600 text-center">{l.noCollection ? 0 : l.hhSegregating}</td>
-                        <td className="px-6 py-5 font-black text-slate-700">{l.noCollection ? '-' : `${l.hhCovered > 0 ? (l.hhGiving/l.hhCovered*100).toFixed(1) : 0}%`}</td>
-                        <td className="px-6 py-5 font-black text-slate-700">{l.noCollection ? '-' : `${l.hhGiving > 0 ? (l.hhSegregating/l.hhGiving*100).toFixed(1) : 0}%`}</td>
-                      </tr>
-                    ))}
+                    {reviewTableData.map((l, i) => {
+                      const givPct = l.hhCovered > 0 ? (l.hhGiving/l.hhCovered*100).toFixed(1) : 0;
+                      const segPct = l.hhGiving > 0 ? (l.hhSegregating/l.hhGiving*100).toFixed(1) : 0;
+                      return (
+                        <tr key={i} className="hover:bg-blue-50/20 transition">
+                          <td className="px-8 py-5 font-bold text-slate-600 text-xs">{l.date}</td>
+                          <td className="px-6 py-5"><div className="font-black text-slate-700">{l.blockName}</div><div className="text-[10px] text-slate-400 font-bold">{l.supervisorName}</div></td>
+                          <td className="px-6 py-5">{l.noCollection ? <span className="px-2 py-1 bg-red-100 text-red-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Gap</span> : <span className="px-2 py-1 bg-green-100 text-green-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Active</span>}</td>
+                          <td className="px-6 py-5 font-black text-slate-700 text-center">{l.hhCovered}</td>
+                          <td className="px-6 py-5 font-black text-blue-600 text-center">{l.noCollection ? 0 : l.hhGiving}</td>
+                          <td className="px-6 py-5 font-black text-purple-600 text-center">{l.noCollection ? 0 : l.hhSegregating}</td>
+                          <td className="px-6 py-5 font-black text-slate-700">{l.noCollection ? '-' : `${givPct}%`}</td>
+                          <td className="px-6 py-5 font-black text-slate-700">{l.noCollection ? '-' : `${segPct}%`}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -625,7 +671,7 @@ const App = () => {
 
         {activeTab === 'entry' && (
           <div className="max-w-xl mx-auto py-6 animate-in slide-in-from-bottom-6">
-            <header className="text-center mb-8"><h1 className="text-2xl font-black text-slate-800">Daily Entry</h1></header>
+            <header className="text-center mb-8"><h1 className="text-2xl font-black text-slate-800">Field Submission</h1></header>
             <div className="bg-white p-8 rounded-[40px] shadow-2xl border border-slate-100 space-y-6">
               <div className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
@@ -691,7 +737,7 @@ const App = () => {
   );
 };
 
-// Start app for Vercel deployment (ReactDOM logic ONLY if element exists)
+// AUTO-RENDER FOR DEPLOYMENT (Ensures browser doesn't appear blank on Vercel)
 const rootElement = document.getElementById('root');
 if (rootElement) {
   const root = ReactDOM.createRoot(rootElement);
