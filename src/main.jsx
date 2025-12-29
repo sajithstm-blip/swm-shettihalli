@@ -3,9 +3,9 @@ import ReactDOM from 'react-dom/client';
 import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
-  sendSignInLinkToEmail,
-  isSignInWithEmailLink,
-  signInWithEmailLink,
+  signInWithRedirect,
+  getRedirectResult,
+  GoogleAuthProvider, 
   onAuthStateChanged,
   signOut 
 } from 'firebase/auth';
@@ -41,13 +41,12 @@ import {
   Truck,
   FileSpreadsheet,
   LogOut,
-  Mail,
   ShieldCheck,
   Table as TableIcon,
   Database,
   Send,
   Loader2,
-  RefreshCw
+  LogIn
 } from 'lucide-react';
 
 /**
@@ -69,6 +68,10 @@ const firebaseConfig = isCanvas
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
+const googleProvider = new GoogleAuthProvider();
+// Force account picker to ensure user can choose their work ID
+googleProvider.setCustomParameters({ prompt: 'select_account' });
+
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'swm-national-v1'; 
 
 const formatDate = (date) => date.toISOString().split('T')[0];
@@ -76,8 +79,6 @@ const formatDate = (date) => date.toISOString().split('T')[0];
 const App = () => {
   const [user, setUser] = useState(null);
   const [userRole, setUserRole] = useState(null); // 'manager', 'coordinator', 'supervisor'
-  const [emailInput, setEmailInput] = useState('');
-  const [isLinkSent, setIsLinkSent] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
   const [roleLoading, setRoleLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -118,32 +119,15 @@ const App = () => {
     reason: "Vehicle didn't come"
   });
 
-  // --- Auth Logic: Passwordless Email Link ---
-  const handleSendLink = async (e) => {
-    e.preventDefault();
-    const cleanEmail = emailInput.trim().toLowerCase();
-    
-    if (!cleanEmail.endsWith('@saahas.org')) {
-      showStatus('error', 'Only @saahas.org emails allowed.');
-      return;
-    }
-
+  // --- Auth Logic: Restricted Google Sign-In with Redirect ---
+  const handleLogin = async () => {
     setAuthLoading(true);
-    const actionCodeSettings = {
-      // Must exactly match the Vercel URL
-      url: window.location.href,
-      handleCodeInApp: true,
-    };
-
     try {
-      await sendSignInLinkToEmail(auth, cleanEmail, actionCodeSettings);
-      window.localStorage.setItem('emailForSignIn', cleanEmail);
-      setIsLinkSent(true);
-      showStatus('success', 'Sign-in link sent to your inbox!');
+      // Use Redirect instead of Popup to bypass quota limits and popup blockers
+      await signInWithRedirect(auth, googleProvider);
     } catch (error) {
-      console.error("Auth Error:", error);
-      showStatus('error', error.message || 'Check Firebase Console Email Link settings.');
-    } finally {
+      console.error(error);
+      showStatus('error', 'Login initiation failed.');
       setAuthLoading(false);
     }
   };
@@ -153,32 +137,25 @@ const App = () => {
     setUserRole(null);
     setUser(null);
     setRoleLoading(false);
-    setIsLinkSent(false);
   };
 
   useEffect(() => {
-    // 1. Detect magic link arrival
-    if (isSignInWithEmailLink(auth, window.location.href)) {
-      let email = window.localStorage.getItem('emailForSignIn');
-      if (!email) {
-        email = window.prompt('Please confirm your @saahas.org email address:');
+    // Check for result from a redirect login
+    getRedirectResult(auth).then((result) => {
+      if (result?.user) {
+        const email = result.user.email.toLowerCase();
+        if (!email.endsWith('@saahas.org')) {
+          signOut(auth);
+          showStatus('error', 'Unauthorized: @saahas.org email required.');
+        }
       }
-      if (email) {
-        setRoleLoading(true);
-        signInWithEmailLink(auth, email, window.location.href)
-          .then(() => {
-            window.localStorage.removeItem('emailForSignIn');
-            window.history.replaceState(null, null, window.location.origin + window.location.pathname);
-            showStatus('success', 'Login successful!');
-          })
-          .catch((err) => {
-            showStatus('error', 'Link expired or used. Get a new link.');
-            setRoleLoading(false);
-          });
+    }).catch(err => {
+      if (err.code !== 'auth/no-auth-event') {
+        showStatus('error', `Login Error: ${err.code}`);
       }
-    }
+    });
 
-    // 2. Auth State and Role Sync
+    // Monitor Auth State
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
       if (u) {
         setUser(u);
@@ -216,12 +193,13 @@ const App = () => {
     const unsubConfig = onSnapshot(configRef, (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
-        setConfig({
+        setConfig(prev => ({ 
+          ...prev, 
           states: data.states || [],
           wards: data.wards || [],
           blocks: data.blocks || [],
           supervisors: data.supervisors || []
-        });
+        }));
       }
     });
 
@@ -238,7 +216,7 @@ const App = () => {
   const showStatus = (type, text) => {
     setStatusMsg({ type, text: String(text) });
     if (type !== 'info') {
-        setTimeout(() => setStatusMsg({ type: '', text: '' }), 6000);
+        setTimeout(() => setStatusMsg({ type: '', text: '' }), 5000);
     }
   };
 
@@ -249,7 +227,7 @@ const App = () => {
       await setDoc(configRef, newConfig);
       showStatus('success', 'Project settings updated!');
     } catch (e) {
-      showStatus('error', 'Failed to save.');
+      showStatus('error', 'Save failed.');
     }
   };
 
@@ -258,9 +236,9 @@ const App = () => {
     try {
       const roleRef = doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', email.toLowerCase().trim());
       await setDoc(roleRef, { role, updatedAt: new Date().toISOString() });
-      showStatus('success', `${email} set as ${role}`);
+      showStatus('success', `Role assigned to ${email}`);
     } catch (e) {
-      showStatus('error', 'Role update failed.');
+      showStatus('error', 'Failed to update role.');
     }
   };
 
@@ -304,7 +282,7 @@ const App = () => {
     }
   };
 
-  // --- Analytical Computations ---
+  // --- Analytics & Formatting ---
   const filteredLogs = useMemo(() => {
     return dailyData.filter(log => {
       const wardMatch = dashWard === 'all' || log.wardId === dashWard;
@@ -341,14 +319,22 @@ const App = () => {
         groups[key] = { name: label, giving: 0, seg: 0, covered: 0, rawDate: log.date };
       }
       
+      groups[key].covered += Number(log.hhCovered || 0);
       if (!log.noCollection) {
         groups[key].giving += Number(log.hhGiving || 0);
         groups[key].seg += Number(log.hhSegregating || 0);
       }
     });
-    // Strict chronological sort for graph tooltip accuracy
     return Object.values(groups).sort((a, b) => a.rawDate.localeCompare(b.rawDate));
   }, [filteredLogs, viewTimeframe]);
+
+  const gapData = useMemo(() => {
+    const reasons = {};
+    filteredLogs.filter(l => l.noCollection).forEach(l => {
+      reasons[l.reason] = (reasons[l.reason] || 0) + 1;
+    });
+    return Object.entries(reasons).map(([name, value]) => ({ name, value }));
+  }, [filteredLogs]);
 
   const handleExportCSV = () => {
     const exportLogs = dailyData.filter(l => l.date >= exportStart && l.date <= exportEnd);
@@ -366,7 +352,7 @@ const App = () => {
       const giv = data.reduce((s,l) => s + (l.noCollection ? 0 : Number(l.hhGiving || 0)), 0);
       const seg = data.reduce((s,l) => s + (l.noCollection ? 0 : Number(l.hhSegregating || 0)), 0);
       return {
-        givPct: cov > 0 ? ((giv/cov)*100).toFixed(2) : "0.00",
+        givingPct: cov > 0 ? ((giv/cov)*100).toFixed(2) : "0.00",
         segPct: giv > 0 ? ((seg/giv)*100).toFixed(2) : "0.00"
       };
     };
@@ -388,7 +374,7 @@ const App = () => {
       });
       return Object.entries(periods).map(([name, data]) => {
         const s = calculateStats(data);
-        return [name, s.givPct, s.segPct];
+        return [name, s.givingPct, s.segPct];
       });
     };
 
@@ -407,16 +393,16 @@ const App = () => {
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `SWM_Report_${exportStart}_to_${exportEnd}.csv`;
+    link.download = `Saahas_SWM_Report_${exportStart}_to_${exportEnd}.csv`;
     link.click();
     showStatus('success', 'Report Downloaded.');
   };
 
-  // --- Master View Switcher ---
-  if (loading || (user && userRole === null)) return (
+  // --- Views ---
+  if (loading) return (
     <div className="flex flex-col items-center justify-center h-screen bg-slate-50 gap-4">
       <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-      <p className="text-slate-500 font-medium">Validating Secure Session...</p>
+      <p className="text-slate-500 font-medium">Authenticating System...</p>
     </div>
   );
 
@@ -431,42 +417,21 @@ const App = () => {
         <div className="bg-blue-50 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto text-blue-600"><Globe size={40} /></div>
         <div className="text-center">
           <h1 className="text-3xl font-black text-slate-800">Saahas SWM</h1>
-          <p className="text-slate-500 mt-2 font-medium">Passwordless Organization Portal</p>
+          <p className="text-slate-500 mt-2 font-medium">Organization Portal</p>
         </div>
-
-        {!isLinkSent ? (
-          <form onSubmit={handleSendLink} className="space-y-4">
-            <div className="space-y-1">
-              <label className="text-[10px] font-black text-slate-400 uppercase ml-1">Work Email</label>
-              <div className="relative">
-                <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
-                <input 
-                  type="email" 
-                  placeholder="name@saahas.org" 
-                  required
-                  className="w-full pl-12 pr-4 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold outline-none focus:border-blue-500 transition"
-                  value={emailInput}
-                  onChange={e => setEmailInput(e.target.value)}
-                />
-              </div>
-            </div>
-            <button 
-              type="submit" 
-              disabled={authLoading}
-              className="w-full bg-blue-600 text-white py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-blue-700 transition shadow-xl disabled:opacity-50"
-            >
-              {authLoading ? <Loader2 className="animate-spin" size={18} /> : <Send size={18} />}
-              {authLoading ? 'Requesting Link...' : 'Get Sign-In Link'}
-            </button>
-            <p className="text-[9px] text-center text-slate-400 font-bold uppercase tracking-tighter">No password required. Login link will be sent to your email.</p>
-          </form>
-        ) : (
-          <div className="p-6 bg-green-50 border border-green-100 rounded-3xl text-center space-y-4 animate-in zoom-in-95">
-            <CheckCircle2 size={48} className="text-green-500 mx-auto" />
-            <p className="font-bold text-green-800 leading-tight">Magic link sent to <b>{emailInput}</b>. Check your inbox to complete sign-in without a password.</p>
-            <button onClick={() => setIsLinkSent(false)} className="text-xs font-bold text-green-600 underline">Enter a different email</button>
-          </div>
-        )}
+        <div className="space-y-4">
+          <button 
+            onClick={handleLogin} 
+            disabled={authLoading}
+            className="w-full bg-blue-600 text-white py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-blue-700 transition shadow-xl disabled:opacity-50"
+          >
+            {authLoading ? <Loader2 className="animate-spin" size={20} /> : <LogIn size={20} />}
+            Sign in with Saahas Email
+          </button>
+          <p className="text-[10px] text-center text-slate-400 font-bold uppercase tracking-widest leading-relaxed px-4">
+            Authorized @saahas.org domains only.
+          </p>
+        </div>
       </div>
     </div>
   );
@@ -483,13 +448,13 @@ const App = () => {
       <div className="max-w-md w-full bg-white p-10 rounded-[40px] shadow-2xl text-center space-y-6">
         <AlertCircle size={64} className="text-red-500 mx-auto" />
         <h1 className="text-2xl font-black text-slate-800">Access Restricted</h1>
-        <p className="text-slate-500 font-medium">Your email <b>{user.email}</b> is not authorized. Please contact your Project Manager to enable your account.</p>
+        <p className="text-slate-500 font-medium">Your email <b>{user.email}</b> is authenticated but not whitelisted. Please contact your Manager.</p>
         <button onClick={handleLogout} className="text-blue-600 font-bold hover:underline">Log Out & Change Account</button>
       </div>
     </div>
   );
 
-  const stats = {
+  const statsAgg = {
     covered: filteredLogs.reduce((s, v) => s + Number(v.hhCovered || 0), 0),
     giving: filteredLogs.reduce((s, v) => s + (v.noCollection ? 0 : Number(v.hhGiving || 0)), 0),
     seg: filteredLogs.reduce((s, v) => s + (v.noCollection ? 0 : Number(v.hhSegregating || 0)), 0),
@@ -524,7 +489,6 @@ const App = () => {
       </nav>
 
       <main className="flex-1 pt-6 px-4 md:pt-10 md:px-10 max-w-7xl overflow-x-hidden">
-        {/* DASHBOARD */}
         {activeTab === 'dashboard' && (
           <div className="space-y-6 animate-in fade-in duration-500">
             <header className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
@@ -576,19 +540,19 @@ const App = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-blue-50 text-blue-600 p-4 rounded-2xl"><Users size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">HH Area</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.covered.toLocaleString()}</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">HH Area</p><p className="text-2xl font-black text-slate-800 leading-tight">{statsAgg.covered.toLocaleString()}</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-indigo-50 text-indigo-600 p-4 rounded-2xl"><Truck size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Participation</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.covered > 0 ? (stats.giving/stats.covered*100).toFixed(1) : 0)}%</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Participation</p><p className="text-2xl font-black text-slate-800 leading-tight">{(statsAgg.covered > 0 ? (statsAgg.giving/statsAgg.covered*100).toFixed(1) : 0)}%</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-green-50 text-green-600 p-4 rounded-2xl"><CheckCircle2 size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Efficiency</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.giving > 0 ? ((stats.seg / stats.giving) * 100).toFixed(1) : 0)}%</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Efficiency</p><p className="text-2xl font-black text-slate-800 leading-tight">{(statsAgg.giving > 0 ? ((statsAgg.seg / statsAgg.giving) * 100).toFixed(1) : 0)}%</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-red-50 text-red-600 p-4 rounded-2xl"><Ban size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Absences</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.absences}</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Absences</p><p className="text-2xl font-black text-slate-800 leading-tight">{statsAgg.absences}</p></div>
               </div>
             </div>
 
@@ -621,7 +585,7 @@ const App = () => {
                 {gapData.length > 0 ? (
                   <div className="h-80"><ResponsiveContainer width="100%" height="100%"><BarChart data={gapData} layout="vertical"><CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f1f5f9" /><XAxis type="number" hide /><YAxis dataKey="name" type="category" axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#64748b', fontWeight: 'bold'}} width={120} /><Tooltip cursor={{fill: '#f8fafc'}} contentStyle={{ borderRadius: '15px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} /><Bar dataKey="value" name="Incidents" radius={[0, 10, 10, 0]}>{gapData.map((_, index) => <Cell key={index} fill={['#ef4444', '#f97316', '#f59e0b', '#84cc16'][index % 4]} />)}</Bar></BarChart></ResponsiveContainer></div>
                 ) : (
-                  <div className="h-full flex flex-col items-center justify-center text-center opacity-30"><CheckCircle2 size={64} className="text-green-500"/><p className="font-bold text-sm mt-3">All Operational!</p></div>
+                  <div className="h-full flex flex-col items-center justify-center text-center opacity-30"><CheckCircle2 size={64} className="text-green-500"/><p className="font-bold text-sm mt-3">All Active!</p></div>
                 )}
               </div>
             </div>
@@ -639,7 +603,7 @@ const App = () => {
               <div className="overflow-x-auto">
                 <table className="w-full text-left">
                   <thead className="bg-slate-50 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                    <tr><th className="px-8 py-5">Date</th><th className="px-6 py-5">Block</th><th className="px-6 py-5">Status</th><th className="px-6 py-5 text-center">Covered</th><th className="px-6 py-5 text-center">Waste Given</th><th className="px-6 py-5 text-center">Waste Segregated</th><th className="px-6 py-5">Given Percentage</th><th className="px-6 py-5">Segregated Percentage</th></tr>
+                    <tr><th className="px-8 py-5">Date</th><th className="px-6 py-5">Block</th><th className="px-6 py-5">Status</th><th className="px-6 py-5 text-center">Covered</th><th className="px-6 py-5 text-center">Waste Given</th><th className="px-6 py-5 text-center">Waste Segregated</th><th className="px-6 py-5">Given %</th><th className="px-6 py-5">Segregated %</th></tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
                     {reviewTableData.map((l, i) => {
@@ -665,10 +629,9 @@ const App = () => {
           </div>
         )}
 
-        {/* DATA ENTRY */}
         {activeTab === 'entry' && (
           <div className="max-w-xl mx-auto py-6 animate-in slide-in-from-bottom-6">
-            <header className="text-center mb-8"><h1 className="text-2xl font-black text-slate-800">Field Data Submission</h1></header>
+            <header className="text-center mb-8"><h1 className="text-2xl font-black text-slate-800">Field Submission</h1></header>
             <div className="bg-white p-8 rounded-[40px] shadow-2xl border border-slate-100 space-y-6">
               <div className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
@@ -707,12 +670,11 @@ const App = () => {
           </div>
         )}
 
-        {/* SETUP */}
         {activeTab === 'setup' && (
           <div className="max-w-4xl mx-auto py-6 space-y-8 animate-in slide-in-from-bottom-6">
             <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800">Operational Hierarchy</h1></header>
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><ShieldCheck className="text-blue-500"/> Team Access Mapping</h3></div>
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><ShieldCheck className="text-blue-500"/> Account Access Mapping</h3></div>
               <div className="grid grid-cols-1 gap-4"><div className="flex flex-col sm:flex-row gap-2"><input id="new-user-email" placeholder="staff@saahas.org" className="flex-1 bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none" /><select id="new-user-role" className="bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none"><option value="supervisor">Supervisor</option><option value="coordinator">Coordinator</option><option value="manager">Manager</option></select><button onClick={() => { const em = document.getElementById('new-user-email').value; const rl = document.getElementById('new-user-role').value; if(em) updateUserRole(em, rl); }} className="bg-blue-600 text-white px-6 py-3 rounded-xl font-black">Authorize</button></div></div>
             </section>
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
@@ -727,7 +689,7 @@ const App = () => {
               <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Database className="text-blue-500" /> Operational Units</h3><button onClick={() => setConfig({...config, blocks: [...config.blocks, { id: Date.now().toString(), name: '', wardId: '', supervisorId: '', totalHH: 0 }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Block</button></div>
               <div className="space-y-4">{config.blocks?.map((bl, bIdx) => (<div key={bl.id} className="bg-slate-50 p-5 rounded-[24px] border border-slate-100 space-y-4 transition hover:bg-slate-100/50"><div className="flex items-center gap-4"><input className="flex-1 bg-transparent font-black text-slate-800 outline-none text-lg border-b-2 border-slate-200 focus:border-blue-500 transition" placeholder="Block Name" value={bl.name} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].name = e.target.value; setConfig({...config, blocks: nb}); }} /><button onClick={() => setConfig({...config, blocks: config.blocks.filter(b => b.id !== bl.id)})} className="text-red-400"><Trash2 size={16}/></button></div><div className="grid grid-cols-2 md:grid-cols-3 gap-4"><select className="bg-white border border-slate-200 rounded-lg p-2 text-xs font-bold outline-none" value={bl.wardId} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].wardId = e.target.value; setConfig({...config, blocks: nb}); }}><option value="">Ward</option>{config.wards?.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select><select className="bg-white border border-slate-200 rounded-lg p-2 text-xs font-bold outline-none" value={bl.supervisorId} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].supervisorId = e.target.value; setConfig({...config, blocks: nb}); }}><option value="">Lead</option>{config.supervisors?.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select><div className="flex items-center gap-2"><label className="text-[10px] font-black text-slate-400 uppercase">Total HH</label><input type="number" className="w-full bg-white border border-slate-200 rounded-lg p-2 font-black text-xs" value={bl.totalHH} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].totalHH = Number(e.target.value); setConfig({...config, blocks: nb}); }} /></div></div></div>))}</div>
             </section>
-            <button onClick={() => saveConfig(config)} className="w-full py-6 bg-gradient-to-r from-green-600 to-green-700 text-white rounded-[32px] font-black text-xl shadow-2xl transition hover:scale-[1.01] active:scale-[0.99]">Publish Operational Logic</button>
+            <button onClick={() => saveConfig(config)} className="w-full py-6 bg-gradient-to-r from-green-600 to-green-700 text-white rounded-[32px] font-black text-xl shadow-2xl transition hover:scale-[1.01] active:scale-[0.99]">Publish operational logic</button>
           </div>
         )}
       </main>
