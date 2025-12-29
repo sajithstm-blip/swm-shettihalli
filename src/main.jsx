@@ -2,18 +2,10 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import ReactDOM from 'react-dom/client';
 import { initializeApp } from 'firebase/app';
 import { 
-  getAuth, 
-  signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
-  onAuthStateChanged,
-  signOut 
-} from 'firebase/auth';
-import { 
   getFirestore, 
   collection, 
   doc, 
   setDoc, 
-  getDoc,
   onSnapshot, 
   query 
 } from 'firebase/firestore';
@@ -39,15 +31,9 @@ import {
   Square,
   Truck,
   FileSpreadsheet,
-  LogOut,
-  Mail,
-  ShieldCheck,
   Table as TableIcon,
   Database,
-  Lock,
-  UserPlus,
   Loader2,
-  LogIn,
   Info
 } from 'lucide-react';
 
@@ -67,29 +53,21 @@ const firebaseConfig = isCanvas
     };
 
 const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
 const db = getFirestore(app);
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'swm-national-v1'; 
 
 const formatDate = (date) => date.toISOString().split('T')[0];
 
 const App = () => {
-  const [user, setUser] = useState(null);
-  const [userRole, setUserRole] = useState(null); 
-  const [authMode, setAuthMode] = useState('login'); 
-  const [emailInput, setEmailInput] = useState('');
-  const [passInput, setPassInput] = useState('');
-  const [authLoading, setAuthLoading] = useState(false);
-  const [roleLoading, setRoleLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('dashboard');
-  
   const [config, setConfig] = useState({ 
     states: [], wards: [], blocks: [], supervisors: [] 
   });
   const [dailyData, setDailyData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [statusMsg, setStatusMsg] = useState({ type: '', text: '' });
-  
+  const fileInputRef = useRef(null);
+
   // Dashboard & Review Filters
   const [dashWard, setDashWard] = useState('all');
   const [dashBlocks, setDashBlocks] = useState([]); 
@@ -117,103 +95,9 @@ const App = () => {
     reason: "Vehicle didn't come"
   });
 
-  // --- Authentication Handlers ---
-  const handleAuth = async (e) => {
-    e.preventDefault();
-    if (passInput.length < 6) {
-        showStatus('error', 'Password must be at least 6 characters.');
-        return;
-    }
-
-    setAuthLoading(true);
-    const cleanEmail = emailInput.trim().toLowerCase();
-    try {
-      if (authMode === 'login') {
-        await signInWithEmailAndPassword(auth, cleanEmail, passInput);
-        showStatus('success', 'Logged in.');
-      } else {
-        await createUserWithEmailAndPassword(auth, cleanEmail, passInput);
-        // Attempt to bootstrap the role in DB, but don't hang if it fails
-        try {
-          if (cleanEmail === 'sajith.tm@saahas.org') {
-            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', cleanEmail), {
-                role: 'manager',
-                updatedAt: new Date().toISOString()
-            });
-          }
-        } catch (dbErr) {
-          console.warn("Role bootstrap DB write failed, fallback bypass will handle it.");
-        }
-        showStatus('success', 'Registration complete.');
-      }
-    } catch (error) {
-      console.error(error);
-      let msg = error.message;
-      if (error.code === 'auth/user-not-found') msg = 'Account not found. Select "Create Account".';
-      if (error.code === 'auth/wrong-password') msg = 'Invalid password.';
-      if (error.code === 'auth/email-already-in-use') msg = 'This email is already registered. Please log in.';
-      showStatus('error', msg);
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
-  const handleLogout = () => {
-    signOut(auth);
-    setUser(null);
-    setUserRole(null);
-  };
-
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (u) => {
-      try {
-        if (u) {
-          const email = u.email.toLowerCase();
-          setUser(u);
-          
-          // --- ADMIN BYPASS: sajith.tm@saahas.org immediate grant ---
-          if (email === 'sajith.tm@saahas.org') {
-             setUserRole('manager');
-             setRoleLoading(false);
-             setLoading(false);
-          } else {
-             setRoleLoading(true);
-             const roleRef = doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', email);
-             const roleSnap = await getDoc(roleRef);
-             if (roleSnap.exists()) {
-               const role = roleSnap.data().role;
-               setUserRole(role);
-               if (role === 'supervisor') setActiveTab('entry');
-             } else {
-               setUserRole('unauthorized');
-             }
-             setRoleLoading(false);
-             setLoading(false);
-          }
-        } else {
-          setUser(null);
-          setUserRole(null);
-          setLoading(false);
-          setRoleLoading(false);
-        }
-      } catch (err) {
-        console.error("Auth Listener Error:", err);
-        // Fallback for admin if DB fails
-        if (u?.email === 'sajith.tm@saahas.org') {
-            setUserRole('manager');
-        } else {
-            setUserRole('unauthorized');
-        }
-        setLoading(false);
-      }
-    });
-    return () => unsubscribe();
-  }, []);
-
   // --- Real-time Data Sync ---
   useEffect(() => {
-    if (!user || !userRole || userRole === 'unauthorized') return;
-
+    // 1. Fetch Configuration
     const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'app_config', 'settings');
     const unsubConfig = onSnapshot(configRef, (docSnap) => {
       if (docSnap.exists()) {
@@ -225,16 +109,21 @@ const App = () => {
           supervisors: data.supervisors || []
         });
       }
+      setLoading(false); // Stop loading once config is pulled
+    }, (err) => {
+      console.error("Config Error:", err);
+      setLoading(false);
     });
 
+    // 2. Fetch Daily Logs
     const dataRef = collection(db, 'artifacts', appId, 'public', 'data', 'daily_logs');
     const unsubData = onSnapshot(query(dataRef), (snapshot) => {
       const logs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setDailyData(logs);
-    });
+    }, (err) => console.error("Data Error:", err));
 
     return () => { unsubConfig(); unsubData(); };
-  }, [user, userRole]);
+  }, []);
 
   // --- Logic Helpers ---
   const showStatus = (type, text) => {
@@ -243,24 +132,12 @@ const App = () => {
   };
 
   const saveConfig = async (newConfig) => {
-    if (userRole !== 'manager') return;
     try {
       const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'app_config', 'settings');
       await setDoc(configRef, newConfig);
-      showStatus('success', 'Changes published.');
+      showStatus('success', 'Configuration saved successfully.');
     } catch (e) {
-      showStatus('error', 'Update failed.');
-    }
-  };
-
-  const updateUserRole = async (email, role) => {
-    if (userRole !== 'manager') return;
-    try {
-      const roleRef = doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', email.toLowerCase().trim());
-      await setDoc(roleRef, { role, updatedAt: new Date().toISOString() });
-      showStatus('success', `Permission assigned to ${email}`);
-    } catch (e) {
-      showStatus('error', 'Failed to update access.');
+      showStatus('error', 'Failed to save configuration.');
     }
   };
 
@@ -292,9 +169,9 @@ const App = () => {
         supervisorId: block?.supervisorId || 'unassigned',
         supervisorName: config.supervisors.find(s => s.id === block?.supervisorId)?.name || 'Unassigned',
         timestamp: new Date().toISOString(),
-        enteredBy: user.email
+        enteredBy: 'public-user'
       });
-      showStatus('success', 'Log saved.');
+      showStatus('success', 'Entry submitted.');
       setFormData({ ...formData, hhCovered: 0, hhGiving: 0, hhSegregating: 0, noCollection: false });
     } catch (e) {
       showStatus('error', "Error saving data.");
@@ -306,11 +183,10 @@ const App = () => {
     return dailyData.filter(log => {
       const wardMatch = dashWard === 'all' || log.wardId === dashWard;
       const blockMatch = dashBlocks.length === 0 || dashBlocks.includes(log.blockId);
-      const supervisorMatch = dashSupervisor === 'all' || log.supervisorId === dashSupervisor;
       const dateMatch = log.date >= dashStartDate && log.date <= dashEndDate;
-      return wardMatch && blockMatch && supervisorMatch && dateMatch;
+      return wardMatch && blockMatch && dateMatch;
     });
-  }, [dailyData, dashWard, dashBlocks, dashSupervisor, dashStartDate, dashEndDate]);
+  }, [dailyData, dashWard, dashBlocks, dashStartDate, dashEndDate]);
 
   const reviewTableData = useMemo(() => {
     return dailyData
@@ -338,41 +214,6 @@ const App = () => {
     return Object.values(groups).sort((a, b) => a.rawDate.localeCompare(b.rawDate));
   }, [filteredLogs, viewTimeframe]);
 
-  const gapData = useMemo(() => {
-    const reasons = {};
-    filteredLogs.filter(l => l.noCollection).forEach(l => {
-      reasons[l.reason] = (reasons[l.reason] || 0) + 1;
-    });
-    return Object.entries(reasons).map(([name, value]) => ({ name, value }));
-  }, [filteredLogs]);
-
-  const performanceTable = useMemo(() => {
-    return config.blocks
-      .filter(b => (dashWard === 'all' || b.wardId === dashWard) && (dashBlocks.length === 0 || dashBlocks.includes(b.id)))
-      .map(block => {
-        const logs = filteredLogs.filter(d => d.blockId === block.id);
-        const valid = logs.filter(l => !l.noCollection);
-        const totalCovered = logs.reduce((s, l) => s + Number(l.hhCovered || 0), 0);
-        const totalGiving = valid.reduce((s, l) => s + Number(l.hhGiving || 0), 0);
-        const totalSeg = valid.reduce((s, l) => s + Number(l.hhSegregating || 0), 0);
-        const absences = logs.filter(l => l.noCollection);
-        const supervisor = config.supervisors.find(s => s.id === block.supervisorId);
-        
-        return {
-          id: block.id,
-          name: block.name,
-          ward: config.wards.find(w => w.id === block.wardId)?.name || 'N/A',
-          supervisor: supervisor?.name || 'Unassigned',
-          covered: totalCovered,
-          giving: totalGiving,
-          seg: totalSeg,
-          absences: absences.length,
-          lastReason: absences.length > 0 ? absences[absences.length - 1].reason : null,
-          rate: totalGiving > 0 ? ((totalSeg / totalGiving) * 100).toFixed(1) : 0
-        };
-      });
-  }, [filteredLogs, config, dashWard, dashBlocks]);
-
   const handleExportCSV = () => {
     const exportLogs = dailyData.filter(l => l.date >= exportStart && l.date <= exportEnd);
     if (exportLogs.length === 0) { showStatus('error', 'No data found.'); return; }
@@ -382,8 +223,8 @@ const App = () => {
       l.noCollection ? 0 : l.hhGiving, l.noCollection ? 0 : l.hhSegregating,
       l.noCollection ? "Absent" : "Collected", l.noCollection ? `"${l.reason}"` : ""
     ]);
-
-    // Calculate Summary Stats
+    
+    // Calculate Averages
     const calculateStats = (data) => {
       const cov = data.reduce((s,l) => s + Number(l.hhCovered || 0), 0);
       const giv = data.reduce((s,l) => s + (l.noCollection ? 0 : Number(l.hhGiving || 0)), 0);
@@ -436,82 +277,11 @@ const App = () => {
   if (loading) return (
     <div className="h-screen flex flex-col items-center justify-center bg-slate-50 gap-4">
       <Loader2 className="animate-spin text-blue-600" size={40}/>
-      <p className="font-bold text-slate-500 tracking-tight uppercase text-[10px]">Initializing Saahas SWM...</p>
+      <p className="font-bold text-slate-500 tracking-tight uppercase text-[10px]">Loading Saahas SWM...</p>
     </div>
   );
 
-  if (!user) return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
-      <div className="max-w-md w-full bg-white p-10 rounded-[40px] shadow-2xl space-y-8 animate-in fade-in">
-        {statusMsg.text && (
-            <div className={`p-4 rounded-2xl flex items-center gap-3 text-xs font-bold ${statusMsg.type === 'error' ? 'bg-red-50 text-red-600' : 'bg-blue-50 text-blue-600'}`}>
-                <AlertCircle size={16} /> {statusMsg.text}
-            </div>
-        )}
-        <div className="bg-blue-50 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto text-blue-600"><Globe size={40} /></div>
-        <div className="text-center">
-          <h1 className="text-3xl font-black text-slate-800">Saahas SWM</h1>
-          <p className="text-slate-500 mt-2 font-medium tracking-tight">Organization Portal</p>
-        </div>
-
-        <form onSubmit={handleAuth} className="space-y-4">
-          <div className="space-y-1">
-            <label className="text-[10px] font-black text-slate-400 uppercase ml-1 tracking-widest">Email ID</label>
-            <div className="relative">
-              <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
-              <input type="email" placeholder="name@saahas.org" required className="w-full pl-12 pr-4 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold outline-none focus:border-blue-500 transition" value={emailInput} onChange={e => setEmailInput(e.target.value)}/>
-            </div>
-          </div>
-          <div className="space-y-1">
-            <label className="text-[10px] font-black text-slate-400 uppercase ml-1 tracking-widest">Password</label>
-            <div className="relative">
-              <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
-              <input type="password" placeholder="min 6 chars" required className="w-full pl-12 pr-4 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold outline-none focus:border-blue-500 transition" value={passInput} onChange={e => setPassInput(e.target.value)}/>
-            </div>
-          </div>
-          <button type="submit" disabled={authLoading} className="w-full bg-blue-600 text-white py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-blue-700 transition shadow-xl shadow-blue-100 active:scale-[0.98]">
-            {authLoading ? <Loader2 className="animate-spin" size={20} /> : (authMode === 'login' ? <LogIn size={20} /> : <UserPlus size={20} />)}
-            {authMode === 'login' ? 'Sign In' : 'Register Account'}
-          </button>
-        </form>
-
-        <div className="text-center">
-          <button onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')} className="text-sm font-bold text-blue-600 hover:underline transition">
-            {authMode === 'login' ? "New user? Register" : "Have an account? Log in"}
-          </button>
-        </div>
-        
-        {emailInput.toLowerCase() === 'sajith.tm@saahas.org' && authMode === 'register' && (
-            <div className="p-4 bg-amber-50 border border-amber-100 rounded-2xl flex items-center gap-3">
-                <Info className="text-amber-500 shrink-0" size={20}/>
-                <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest leading-relaxed text-left">
-                    Admin Bypass Active. Credentials verified against hardcoded system key.
-                </p>
-            </div>
-        )}
-      </div>
-    </div>
-  );
-
-  if (roleLoading) return (
-    <div className="h-screen flex flex-col items-center justify-center bg-slate-50 gap-4">
-      <Loader2 className="animate-spin text-blue-600" size={40}/>
-      <p className="font-bold text-slate-500 text-center tracking-tight uppercase text-[10px]">Permission Check.<br/>Verifying access for {user.email}...</p>
-    </div>
-  );
-
-  if (userRole === 'unauthorized') return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
-      <div className="max-w-md w-full bg-white p-10 rounded-[40px] shadow-2xl text-center space-y-6">
-        <AlertCircle size={64} className="text-red-500 mx-auto" />
-        <h1 className="text-2xl font-black text-slate-800">Access Restricted</h1>
-        <p className="text-slate-500 font-medium">Authentication complete, but your account is not whitelisted. Please contact <b>sajith.tm@saahas.org</b> for authorization.</p>
-        <button onClick={handleLogout} className="text-blue-600 font-bold hover:underline flex items-center gap-2 mx-auto"><LogOut size={16}/> Logout & Change ID</button>
-      </div>
-    </div>
-  );
-
-  const stats = {
+  const statsAgg = {
     covered: filteredLogs.reduce((s, v) => s + Number(v.hhCovered || 0), 0),
     giving: filteredLogs.reduce((s, v) => s + (v.noCollection ? 0 : Number(v.hhGiving || 0)), 0),
     seg: filteredLogs.reduce((s, v) => s + (v.noCollection ? 0 : Number(v.hhSegregating || 0)), 0),
@@ -522,29 +292,18 @@ const App = () => {
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans pb-20 md:pb-0 flex flex-col md:flex-row">
       <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 flex justify-around p-2 z-50 md:sticky md:top-0 md:flex-col md:w-64 md:h-screen md:justify-start md:gap-2 md:p-6 shadow-sm">
         <div className="hidden md:flex p-2 font-black text-2xl text-blue-600 mb-8 items-center gap-3"><Globe size={32} /> <span>Saahas SWM</span></div>
-        {(userRole === 'manager' || userRole === 'coordinator') && (
-          <>
-            <button onClick={() => setActiveTab('dashboard')} className={`flex-1 md:flex-none flex flex-col md:flex-row items-center gap-3 px-4 py-3 rounded-2xl transition ${activeTab === 'dashboard' ? 'text-blue-600 bg-blue-50 font-bold shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}><LayoutDashboard size={20} /><span className="text-[10px] md:text-base">Analytics</span></button>
-            <button onClick={() => setActiveTab('review')} className={`flex-1 md:flex-none flex flex-col md:flex-row items-center gap-3 px-4 py-3 rounded-2xl transition ${activeTab === 'review' ? 'text-blue-600 bg-blue-50 font-bold shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}><TableIcon size={20} /><span className="text-[10px] md:text-base">Review</span></button>
-          </>
-        )}
+        <button onClick={() => setActiveTab('dashboard')} className={`flex-1 md:flex-none flex flex-col md:flex-row items-center gap-3 px-4 py-3 rounded-2xl transition ${activeTab === 'dashboard' ? 'text-blue-600 bg-blue-50 font-bold shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}><LayoutDashboard size={20} /><span className="text-[10px] md:text-base">Analytics</span></button>
+        <button onClick={() => setActiveTab('review')} className={`flex-1 md:flex-none flex flex-col md:flex-row items-center gap-3 px-4 py-3 rounded-2xl transition ${activeTab === 'review' ? 'text-blue-600 bg-blue-50 font-bold shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}><TableIcon size={20} /><span className="text-[10px] md:text-base">Review</span></button>
         <button onClick={() => setActiveTab('entry')} className={`flex-1 md:flex-none flex flex-col md:flex-row items-center gap-3 px-4 py-3 rounded-2xl transition ${activeTab === 'entry' ? 'text-blue-600 bg-blue-50 font-bold shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}><PlusCircle size={20} /><span className="text-[10px] md:text-base tracking-tight">Entry</span></button>
-        {userRole === 'manager' && (
-          <button onClick={() => setActiveTab('setup')} className={`flex-1 md:flex-none flex flex-col md:flex-row items-center gap-3 px-4 py-3 rounded-2xl transition ${activeTab === 'setup' ? 'text-blue-600 bg-blue-50 font-bold shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}><Settings size={20} /><span className="text-[10px] md:text-base">Setup</span></button>
-        )}
-        <div className="mt-auto hidden md:block pt-6 border-t border-slate-100">
-          <div className="flex items-center gap-3 px-4 py-2 mb-4">
-            <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold text-xs">{user.email[0].toUpperCase()}</div>
-            <div className="flex flex-col"><span className="text-xs font-black text-slate-700 truncate max-w-[120px]">{user.email.split('@')[0]}</span><span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">{userRole}</span></div>
-          </div>
-          <button onClick={handleLogout} className="w-full flex items-center gap-3 px-4 py-3 text-red-500 font-bold hover:bg-red-50 rounded-2xl transition"><LogOut size={18} /> Logout</button>
-        </div>
+        <button onClick={() => setActiveTab('setup')} className={`flex-1 md:flex-none flex flex-col md:flex-row items-center gap-3 px-4 py-3 rounded-2xl transition ${activeTab === 'setup' ? 'text-blue-600 bg-blue-50 font-bold shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}><Settings size={20} /><span className="text-[10px] md:text-base">Setup</span></button>
       </nav>
 
       <main className="flex-1 pt-6 px-4 md:pt-10 md:px-10 max-w-7xl overflow-x-hidden">
+        
         {/* DASHBOARD VIEW */}
         {activeTab === 'dashboard' && (
           <div className="space-y-6 animate-in fade-in duration-500">
+            {/* Header */}
             <header className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
               <div><h1 className="text-3xl font-bold tracking-tight text-slate-800">Operational Dashboard</h1><p className="text-slate-500 font-medium tracking-tight">Real-time India SWM performance tracking</p></div>
               <div className="bg-white p-4 rounded-[28px] border border-slate-200 shadow-sm flex flex-col sm:flex-row items-center gap-4">
@@ -557,6 +316,7 @@ const App = () => {
               </div>
             </header>
 
+            {/* Filters */}
             <div className="bg-white p-6 rounded-[32px] shadow-sm border border-slate-100 space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 items-end">
                 <div className="space-y-1"><label className="text-[10px] font-bold text-slate-400 uppercase ml-1 tracking-widest">Ward Mapping</label>
@@ -586,63 +346,36 @@ const App = () => {
               </div>
             </div>
 
+            {/* Metrics */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-blue-50 text-blue-600 p-4 rounded-2xl"><Users size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none mb-1">HH Covered</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.covered.toLocaleString()}</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none mb-1">HH Covered</p><p className="text-2xl font-black text-slate-800 leading-tight">{statsAgg.covered.toLocaleString()}</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-indigo-50 text-indigo-600 p-4 rounded-2xl"><Truck size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none mb-1">Participation</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.covered > 0 ? (stats.giving/stats.covered*100).toFixed(1) : 0)}%</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none mb-1">Participation</p><p className="text-2xl font-black text-slate-800 leading-tight">{(statsAgg.covered > 0 ? (statsAgg.giving/statsAgg.covered*100).toFixed(1) : 0)}%</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-green-50 text-green-600 p-4 rounded-2xl"><CheckCircle2 size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none mb-1">Efficiency</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.giving > 0 ? ((stats.seg / stats.giving) * 100).toFixed(1) : 0)}%</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none mb-1">Efficiency</p><p className="text-2xl font-black text-slate-800 leading-tight">{(statsAgg.giving > 0 ? ((statsAgg.seg / statsAgg.giving) * 100).toFixed(1) : 0)}%</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-red-50 text-red-600 p-4 rounded-2xl"><Ban size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none mb-1">Absences</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.absences}</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none mb-1">Absences</p><p className="text-2xl font-black text-slate-800 leading-tight">{statsAgg.absences}</p></div>
               </div>
             </div>
 
+            {/* Graphs */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2 bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
                 <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8 tracking-tight"><History className="text-blue-500" size={20}/> Coverage Timeline</h3>
                 <div className="h-80"><ResponsiveContainer width="100%" height="100%"><AreaChart data={timeSeriesData}><defs><linearGradient id="colorGiving" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#3b82f6" stopOpacity={0.1}/><stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/></linearGradient><linearGradient id="colorSeg" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#a855f7" stopOpacity={0.1}/><stop offset="95%" stopColor="#a855f7" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" /><XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94a3b8'}} /><YAxis axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94a3b8'}} /><Tooltip contentStyle={{ borderRadius: '20px', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)' }} labelStyle={{ fontSize: '14px', fontWeight: '900', color: '#1e293b' }} /><Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} /><Area type="monotone" dataKey="giving" name="Giving Waste" stroke="#3b82f6" strokeWidth={4} fillOpacity={1} fill="url(#colorGiving)" /><Area type="monotone" dataKey="seg" name="Waste Segregated" stroke="#a855f7" strokeWidth={4} fillOpacity={1} fill="url(#colorSeg)" /></AreaChart></ResponsiveContainer></div>
               </div>
-              <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
-                <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8"><Ban className="text-red-500" size={20}/> Failure Gaps</h3>
-                {gapData.length > 0 ? (
-                  <div className="h-80"><ResponsiveContainer width="100%" height="100%"><BarChart data={gapData} layout="vertical"><CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f1f5f9" /><XAxis type="number" hide /><YAxis dataKey="name" type="category" axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#64748b', fontWeight: 'bold'}} width={120} /><Tooltip cursor={{fill: '#f8fafc'}} contentStyle={{ borderRadius: '15px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} /><Bar dataKey="value" name="Incidents" radius={[0, 10, 10, 0]}>{gapData.map((_, index) => <Cell key={index} fill={['#ef4444', '#f97316', '#f59e0b', '#84cc16'][index % 4]} />)}</Bar></BarChart></ResponsiveContainer></div>
-                ) : (
-                  <div className="h-full flex flex-col items-center justify-center text-center opacity-30"><CheckCircle2 size={64} className="text-green-500"/><p className="font-bold text-sm mt-3">All Active!</p></div>
-                )}
-              </div>
-            </div>
-            
-            {/* OPERATIONAL BREAKDOWN TABLE */}
-            <div className="bg-white rounded-[40px] shadow-sm border border-slate-100 overflow-hidden mb-12">
-              <div className="p-8 border-b border-slate-50">
-                <h2 className="font-black text-slate-800 text-xl">Operational Unit Breakdown</h2>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left">
-                  <thead className="bg-slate-50 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                    <tr><th className="px-8 py-5">Block</th><th className="px-6 py-5">Supervisor</th><th className="px-6 py-5 text-center">HH Covered</th><th className="px-6 py-5 text-center">Giving</th><th className="px-8 py-5">Segregation Efficiency</th><th className="px-6 py-5">Gaps</th></tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-50">
-                    {performanceTable.map((block, i) => (
-                      <tr key={i} className="hover:bg-blue-50/20 transition group">
-                        <td className="px-8 py-5"><div className="font-black text-slate-700">{block.name}</div><div className="text-[10px] text-slate-400 font-bold mt-0.5">{block.ward}</div></td>
-                        <td className="px-6 py-5 font-bold text-slate-500 text-sm">{block.supervisor}</td>
-                        <td className="px-6 py-5 font-black text-slate-700 text-center">{block.covered}</td>
-                        <td className="px-6 py-5 font-black text-blue-600 text-center">{block.giving}</td>
-                        <td className="px-8 py-5"><div className="flex items-center gap-3"><div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden max-w-[100px]"><div className={`h-full rounded-full ${Number(block.rate) > 85 ? 'bg-green-500' : 'bg-amber-500'}`} style={{width: `${block.rate}%`}} /></div><span className="text-sm font-black text-slate-700">{block.rate}%</span></div></td>
-                        <td className="px-6 py-5">{block.absences > 0 ? <div className="text-red-500 text-[10px] font-bold">{block.absences} Gaps</div> : <div className="text-green-600 text-[10px] font-bold">100% Active</div>}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100 flex flex-col justify-center items-center gap-4 text-center">
+                 <div className="w-24 h-24 rounded-full bg-blue-50 flex items-center justify-center text-blue-600 mb-2"><TrendingUp size={48}/></div>
+                 <h4 className="font-black text-slate-800 text-lg uppercase tracking-tight">System Status</h4>
+                 <p className="text-slate-400 text-sm font-medium">Tracking active across {config.blocks?.length || 0} blocks.</p>
               </div>
             </div>
           </div>
@@ -685,16 +418,64 @@ const App = () => {
           </div>
         )}
 
-        {/* ENTRY & SETUP TABS (Standard) */}
+        {/* DATA ENTRY VIEW */}
         {activeTab === 'entry' && (
-           <div className="max-w-xl mx-auto py-6 animate-in slide-in-from-bottom-6">
-              {/* Entry form implementation */}
-           </div>
+          <div className="max-w-xl mx-auto py-6 animate-in slide-in-from-bottom-6">
+            <header className="text-center mb-8"><h1 className="text-2xl font-black text-slate-800 tracking-tight">Field Submission</h1></header>
+            <div className="bg-white p-8 rounded-[40px] shadow-2xl border border-slate-100 space-y-6">
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase ml-1 tracking-widest">Ward Mapping</label><select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none" value={entryWard} onChange={(e) => {setEntryWard(e.target.value); setEntryBlock('');}}><option value="">Select Ward</option>{config.wards?.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></div>
+                  <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase ml-1 tracking-widest">Operating Block</label><select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none" value={entryBlock} onChange={(e) => setEntryBlock(e.target.value)}><option value="">Select Block</option>{config.blocks?.filter(b => b.wardId === entryWard).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></div>
+                </div>
+                <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase text-center block tracking-widest">Collection Date</label><input type="date" className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none text-center" value={formData.date} onChange={(e) => setFormData({...formData, date: e.target.value})} /></div>
+              </div>
+              {/* Optional No Collection Toggle */}
+              <div className="flex items-center gap-3 p-5 bg-red-50 rounded-3xl border border-red-100">
+                <input type="checkbox" id="noCollection" className="w-6 h-6 rounded-lg text-red-600 border-red-200" checked={formData.noCollection} onChange={(e) => setFormData({...formData, noCollection: e.target.checked})} />
+                <label htmlFor="noCollection" className="text-red-700 font-bold text-sm tracking-tight">Gaps: No Collection Activity Today</label>
+              </div>
+              {formData.noCollection ? (
+                <div className="space-y-1 animate-in slide-in-from-top-2"><label className="text-[10px] font-black text-slate-400 uppercase ml-1">Reason for Gap</label><select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-white font-bold outline-none" value={formData.reason} onChange={(e) => setFormData({...formData, reason: e.target.value})}><option value="Vehicle didn't come">1) Vehicle didn't come</option><option value="Vehicle breakdown">2) Vehicle breakdown</option><option value="Collection staff not available">3) Collection staff not available</option><option value="Field supervisor absent">4) Field supervisor absent</option></select></div>
+              ) : (
+                <div className="grid grid-cols-1 gap-4 pt-4 border-t border-slate-50 animate-in fade-in">
+                  {[{ label: 'Total HH Covered', key: 'hhCovered', bg: 'bg-slate-50', text: 'text-slate-600' }, { label: 'HH Giving Waste', key: 'hhGiving', bg: 'bg-blue-50', text: 'text-blue-700' }, { label: 'HH Segregating', key: 'hhSegregating', bg: 'bg-purple-50', text: 'text-purple-700' }].map(f => (
+                    <div key={f.key} className={`${f.bg} p-5 rounded-3xl flex items-center justify-between border border-white/50 shadow-inner`}><span className={`${f.text} font-bold text-sm`}>{f.label}</span><input type="number" className="w-24 text-right bg-transparent border-none outline-none font-black text-2xl text-slate-800" value={formData[f.key]} onChange={(e) => setFormData({...formData, [f.key]: Number(e.target.value)})} /></div>
+                  ))}
+                </div>
+              )}
+              <button onClick={submitDailyLog} className="w-full bg-blue-600 text-white py-5 rounded-[24px] font-black text-lg shadow-xl active:scale-[0.98] transition-all">Submit Intake</button>
+            </div>
+          </div>
         )}
+
+        {/* SETUP VIEW */}
         {activeTab === 'setup' && (
-           <div className="max-w-4xl mx-auto py-6 space-y-8 animate-in slide-in-from-bottom-6">
-              {/* Setup UI implementation */}
-           </div>
+          <div className="max-w-4xl mx-auto py-6 space-y-8 animate-in slide-in-from-bottom-6">
+            {statusMsg.text && <div className="fixed top-4 right-4 p-4 bg-blue-600 text-white rounded-xl shadow-2xl font-bold">{statusMsg.text}</div>}
+            <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800 tracking-tight">Operational Setup</h1></header>
+            <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><ShieldCheck className="text-blue-500"/> Team Access Mapping</h3></div>
+              <div className="grid grid-cols-1 gap-4"><div className="flex flex-col sm:flex-row gap-2"><input id="new-user-email" placeholder="staff@saahas.org" className="flex-1 bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none" /><select id="new-user-role" className="bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none"><option value="supervisor">Supervisor</option><option value="coordinator">Coordinator</option><option value="manager">Manager</option></select><button onClick={() => { const em = document.getElementById('new-user-email').value; const rl = document.getElementById('new-user-role').value; if(em) updateUserRole(em, rl); }} className="bg-blue-600 text-white px-6 py-3 rounded-xl font-black active:scale-95 transition">Authorize Staff</button></div></div>
+            </section>
+            
+            <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Users className="text-blue-500"/> Lead List</h3><button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Staff</button></div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{config.supervisors?.map((fs, idx) => (<div key={fs.id} className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100 transition hover:bg-white hover:shadow-md"><input placeholder="Full Name" className="flex-1 bg-transparent border-none outline-none font-bold text-slate-700" value={fs.name} onChange={(e) => { const ns = [...config.supervisors]; ns[idx].name = e.target.value; setConfig({...config, supervisors: ns}); }} /><button onClick={() => removeSupervisor(fs.id)} className="text-red-400 hover:text-red-600 transition"><Trash2 size={18}/></button></div>))}</div>
+            </section>
+            
+            <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Globe className="text-blue-500" /> Geography Mapping</h3><button onClick={() => setConfig({...config, states: [...config.states, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add State</button></div>
+              <div className="space-y-6">{config.states?.map((st, sIdx) => (<div key={st.id} className="border border-slate-100 rounded-[24px] overflow-hidden"><div className="bg-slate-50 p-4 flex items-center gap-4"><input className="flex-1 bg-transparent font-black text-blue-600 outline-none text-lg" placeholder="State Name" value={st.name} onChange={(e) => { const ns = [...config.states]; ns[sIdx].name = e.target.value; setConfig({...config, states: ns}); }} /><button onClick={() => setConfig({...config, wards: [...config.wards, { id: Date.now().toString(), stateId: st.id, name: '' }]})} className="text-[10px] bg-white border border-slate-200 px-3 py-1.5 rounded-lg font-bold">+ Ward</button><button onClick={() => setConfig({...config, states: config.states.filter(s => s.id !== st.id)})} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button></div><div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-2">{config.wards?.filter(w => w.stateId === st.id).map((wd) => (<div key={wd.id} className="flex items-center gap-2 bg-white border border-slate-100 p-2 rounded-xl"><input className="flex-1 text-sm font-bold outline-none" placeholder="Ward" value={wd.name} onChange={(e) => { const nw = [...config.wards]; const idx = config.wards.findIndex(w => w.id === wd.id); nw[idx].name = e.target.value; setConfig({...config, wards: nw}); }} /><button onClick={() => setConfig({...config, wards: config.wards.filter(w => w.id !== wd.id)})} className="text-red-400">&times;</button></div>))}</div></div>))}</div>
+            </section>
+            
+            <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Database className="text-blue-500" /> Operational Units</h3><button onClick={() => setConfig({...config, blocks: [...config.blocks, { id: Date.now().toString(), name: '', wardId: '', supervisorId: '', totalHH: 0 }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Block</button></div>
+              <div className="space-y-4">{config.blocks?.map((bl, bIdx) => (<div key={bl.id} className="bg-slate-50 p-5 rounded-[24px] border border-slate-100 space-y-4 transition hover:bg-slate-100/50"><div className="flex items-center gap-4"><input className="flex-1 bg-transparent font-black text-slate-800 outline-none text-lg border-b-2 border-slate-200 focus:border-blue-500 transition" placeholder="Block Name" value={bl.name} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].name = e.target.value; setConfig({...config, blocks: nb}); }} /><button onClick={() => setConfig({...config, blocks: config.blocks.filter(b => b.id !== bl.id)})} className="text-red-400"><Trash2 size={16}/></button></div><div className="grid grid-cols-2 md:grid-cols-3 gap-4"><select className="bg-white border border-slate-200 rounded-lg p-2 text-xs font-bold outline-none" value={bl.wardId} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].wardId = e.target.value; setConfig({...config, blocks: nb}); }}><option value="">Ward</option>{config.wards?.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select><select className="bg-white border border-slate-200 rounded-lg p-2 text-xs font-bold outline-none" value={bl.supervisorId} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].supervisorId = e.target.value; setConfig({...config, blocks: nb}); }}><option value="">Lead</option>{config.supervisors?.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select><div className="flex items-center gap-2"><label className="text-[10px] font-black text-slate-400 uppercase">Total HH</label><input type="number" className="w-full bg-white border border-slate-200 rounded-lg p-2 font-black text-xs" value={bl.totalHH} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].totalHH = Number(e.target.value); setConfig({...config, blocks: nb}); }} /></div></div></div>))}</div>
+            </section>
+            
+            <button onClick={() => saveConfig(config)} className="w-full py-6 bg-gradient-to-r from-green-600 to-green-700 text-white rounded-[32px] font-black text-xl shadow-2xl transition hover:scale-[1.01] active:scale-[0.99]">Publish Operational Settings</button>
+          </div>
         )}
       </main>
     </div>
