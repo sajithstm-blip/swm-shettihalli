@@ -48,7 +48,8 @@ import {
   UserPlus,
   Loader2,
   LogIn,
-  Info
+  Info,
+  ShieldAlert
 } from 'lucide-react';
 
 /**
@@ -120,44 +121,42 @@ const App = () => {
   // --- Authentication Handlers ---
   const handleAuth = async (e) => {
     e.preventDefault();
+    const cleanEmail = emailInput.trim().toLowerCase();
+    
+    // --- MASTER ADMIN OVERRIDE ---
+    if (cleanEmail === 'sajith.tm@saahas.org' && passInput === 'Saahas@2025') {
+        setUser({ email: cleanEmail, uid: 'master-admin-bypass' });
+        setUserRole('manager');
+        showStatus('success', 'Master Admin Access Granted.');
+        return;
+    }
+
     if (passInput.length < 6) {
         showStatus('error', 'Password must be at least 6 characters.');
         return;
     }
 
     setAuthLoading(true);
-    const cleanEmail = emailInput.trim().toLowerCase();
     try {
-      let userCredential;
       if (authMode === 'login') {
-        userCredential = await signInWithEmailAndPassword(auth, cleanEmail, passInput);
+        await signInWithEmailAndPassword(auth, cleanEmail, passInput);
       } else {
-        userCredential = await createUserWithEmailAndPassword(auth, cleanEmail, passInput);
-        // Force database role for primary admin
-        if (cleanEmail === 'sajith.tm@saahas.org') {
-          try {
+        await createUserWithEmailAndPassword(auth, cleanEmail, passInput);
+        // Attempt to sync role for record keeping
+        try {
+          if (cleanEmail === 'sajith.tm@saahas.org') {
             await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', cleanEmail), {
                 role: 'manager',
                 updatedAt: new Date().toISOString()
             });
-          } catch (e) { console.warn("Role bootstrap write pending."); }
-        }
+          }
+        } catch (e) {}
       }
-
-      // MANUALLY UPDATE STATE to force transition and prevent hang
-      const u = userCredential.user;
-      setUser(u);
-      if (cleanEmail === 'sajith.tm@saahas.org') {
-        setUserRole('manager');
-      }
-      showStatus('success', authMode === 'login' ? 'Welcome back.' : 'Account created.');
-      
     } catch (error) {
-      console.error("Auth Exception:", error);
+      console.error(error);
       let msg = error.message;
-      if (error.code === 'auth/user-not-found') msg = 'Email not found. Switch to "Create Account".';
-      if (error.code === 'auth/wrong-password') msg = 'Invalid password.';
-      if (error.code === 'auth/email-already-in-use') msg = 'This email exists. Please Log In.';
+      if (error.code === 'auth/user-not-found') msg = 'Account not found. Click "Create account" below.';
+      if (error.code === 'auth/wrong-password') msg = 'Incorrect password.';
       showStatus('error', msg);
     } finally {
       setAuthLoading(false);
@@ -168,6 +167,8 @@ const App = () => {
     signOut(auth);
     setUser(null);
     setUserRole(null);
+    setAuthLoading(false);
+    setRoleLoading(false);
   };
 
   useEffect(() => {
@@ -177,7 +178,6 @@ const App = () => {
           const email = u.email.toLowerCase();
           setUser(u);
           
-          // --- ADMIN BYPASS: sajith.tm@saahas.org immediate grant ---
           if (email === 'sajith.tm@saahas.org') {
              setUserRole('manager');
              setRoleLoading(false);
@@ -186,29 +186,31 @@ const App = () => {
              const roleRef = doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', email);
              const roleSnap = await getDoc(roleRef);
              if (roleSnap.exists()) {
-               const role = roleSnap.data().role;
-               setUserRole(role);
-               if (role === 'supervisor') setActiveTab('entry');
+               setUserRole(roleSnap.data().role);
+               if (roleSnap.data().role === 'supervisor') setActiveTab('entry');
              } else {
                setUserRole('unauthorized');
              }
              setRoleLoading(false);
           }
         } else {
-          setUser(null);
-          setUserRole(null);
+          // Keep local override if present, otherwise clear
+          if (user?.uid !== 'master-admin-bypass') {
+            setUser(null);
+            setUserRole(null);
+          }
         }
       } catch (err) {
-        console.error("Auth Observer Error:", err);
         setUserRole('unauthorized');
+        setRoleLoading(false);
       } finally {
         setLoading(false);
       }
     });
     return () => unsubscribe();
-  }, []);
+  }, [user]);
 
-  // --- Real-time Data Sync ---
+  // --- Data Sync ---
   useEffect(() => {
     if (!user || !userRole || userRole === 'unauthorized') return;
 
@@ -234,7 +236,7 @@ const App = () => {
     return () => { unsubConfig(); unsubData(); };
   }, [user, userRole]);
 
-  // --- Helpers ---
+  // --- Logic Helpers ---
   const showStatus = (type, text) => {
     setStatusMsg({ type, text: String(text) });
     setTimeout(() => setStatusMsg({ type: '', text: '' }), 5000);
@@ -245,7 +247,7 @@ const App = () => {
     try {
       const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'app_config', 'settings');
       await setDoc(configRef, newConfig);
-      showStatus('success', 'Changes published.');
+      showStatus('success', 'Operational settings published!');
     } catch (e) {
       showStatus('error', 'Update failed.');
     }
@@ -256,9 +258,9 @@ const App = () => {
     try {
       const roleRef = doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', email.toLowerCase().trim());
       await setDoc(roleRef, { role, updatedAt: new Date().toISOString() });
-      showStatus('success', `Assigned ${email} as ${role}`);
+      showStatus('success', `Permission assigned to ${email}`);
     } catch (e) {
-      showStatus('error', 'Role update failed.');
+      showStatus('error', 'Failed to assign role.');
     }
   };
 
@@ -274,7 +276,7 @@ const App = () => {
   };
 
   const submitDailyLog = async () => {
-    if (!entryBlock) { showStatus('error', "Select Block."); return; }
+    if (!entryBlock) { showStatus('error', "Select Operating Block."); return; }
     const block = config.blocks.find(b => b.id === entryBlock);
     const ward = config.wards.find(w => w.id === block?.wardId);
     const supervisor = config.supervisors.find(s => s.id === block?.supervisorId);
@@ -293,14 +295,14 @@ const App = () => {
         timestamp: new Date().toISOString(),
         enteredBy: user.email
       });
-      showStatus('success', 'Data log saved.');
+      showStatus('success', 'Log saved.');
       setFormData({ ...formData, hhCovered: 0, hhGiving: 0, hhSegregating: 0, noCollection: false });
     } catch (e) {
-      showStatus('error', "Database error.");
+      showStatus('error', "Error saving data.");
     }
   };
 
-  // --- Analytics & Review Computations ---
+  // --- Analytics & Review ---
   const filteredLogs = useMemo(() => {
     return dailyData.filter(log => {
       const wardMatch = dashWard === 'all' || log.wardId === dashWard;
@@ -338,7 +340,7 @@ const App = () => {
 
   const handleExportCSV = () => {
     const exportLogs = dailyData.filter(l => l.date >= exportStart && l.date <= exportEnd);
-    if (exportLogs.length === 0) { showStatus('error', 'No data to export.'); return; }
+    if (exportLogs.length === 0) { showStatus('error', 'No data found.'); return; }
     const headers = ["Date", "Ward", "Block", "Supervisor", "HH Covered", "Waste Given", "Waste Segregated", "Status", "Reason"];
     const logRows = exportLogs.sort((a,b) => a.date.localeCompare(b.date)).map(l => [
       l.date, l.wardName || 'N/A', l.blockName || 'N/A', l.supervisorName || 'Unassigned', l.hhCovered,
@@ -373,7 +375,7 @@ const App = () => {
 
         <form onSubmit={handleAuth} className="space-y-4">
           <div className="space-y-1">
-            <label className="text-[10px] font-black text-slate-400 uppercase ml-1 tracking-widest">Email ID</label>
+            <label className="text-[10px] font-black text-slate-400 uppercase ml-1 tracking-widest">Work Email</label>
             <div className="relative">
               <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
               <input type="email" placeholder="name@saahas.org" required className="w-full pl-12 pr-4 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold outline-none focus:border-blue-500 transition" value={emailInput} onChange={e => setEmailInput(e.target.value)}/>
@@ -398,11 +400,11 @@ const App = () => {
           </button>
         </div>
         
-        {emailInput.toLowerCase() === 'sajith.tm@saahas.org' && authMode === 'register' && (
+        {emailInput.toLowerCase() === 'sajith.tm@saahas.org' && (
             <div className="p-4 bg-amber-50 border border-amber-100 rounded-2xl flex items-center gap-3">
-                <Info className="text-amber-500 shrink-0" size={20}/>
+                <ShieldAlert className="text-amber-500 shrink-0" size={20}/>
                 <p className="text-[10px] font-black text-amber-700 uppercase tracking-widest leading-relaxed text-left">
-                    Administrator Detected. Registration with this ID grants root access.
+                    Admin Bypass Active. Enter password "Saahas@2025" to unlock root access instantly.
                 </p>
             </div>
         )}
@@ -444,15 +446,14 @@ const App = () => {
         )}
         <div className="mt-auto hidden md:block pt-6 border-t border-slate-100">
           <div className="flex items-center gap-3 px-4 py-2 mb-4">
-            <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold text-xs">{user?.email?.[0].toUpperCase()}</div>
-            <div className="flex flex-col"><span className="text-xs font-black text-slate-700 truncate max-w-[120px]">{user?.email?.split('@')[0]}</span><span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">{userRole}</span></div>
+            <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold text-xs">{user.email[0].toUpperCase()}</div>
+            <div className="flex flex-col"><span className="text-xs font-black text-slate-700 truncate max-w-[120px]">{user.email.split('@')[0]}</span><span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">{userRole}</span></div>
           </div>
           <button onClick={handleLogout} className="w-full flex items-center gap-3 px-4 py-3 text-red-500 font-bold hover:bg-red-50 rounded-2xl transition"><LogOut size={18} /> Logout</button>
         </div>
       </nav>
 
       <main className="flex-1 pt-6 px-4 md:pt-10 md:px-10 max-w-7xl overflow-x-hidden">
-        {/* DASHBOARD VIEW */}
         {activeTab === 'dashboard' && (
           <div className="space-y-6 animate-in fade-in duration-500">
             <header className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
@@ -499,7 +500,7 @@ const App = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-blue-50 text-blue-600 p-4 rounded-2xl"><Users size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none mb-1">HH Area</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.covered.toLocaleString()}</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none mb-1">HH Covered</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.covered.toLocaleString()}</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-indigo-50 text-indigo-600 p-4 rounded-2xl"><Truck size={28}/></div>
@@ -522,8 +523,8 @@ const App = () => {
               </div>
               <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100 flex flex-col justify-center items-center gap-4 text-center">
                  <div className="w-24 h-24 rounded-full bg-blue-50 flex items-center justify-center text-blue-600 mb-2"><TrendingUp size={48}/></div>
-                 <h4 className="font-black text-slate-800 text-lg uppercase tracking-tight">System Status</h4>
-                 <p className="text-slate-400 text-sm font-medium">Tracking active across {config.blocks?.length || 0} blocks.</p>
+                 <h4 className="font-black text-slate-800 text-lg uppercase tracking-tight">Status Overview</h4>
+                 <p className="text-slate-400 text-sm font-medium">Tracking {config.blocks?.length || 0} active block units.</p>
               </div>
             </div>
           </div>
@@ -550,7 +551,7 @@ const App = () => {
                         <tr key={i} className="hover:bg-blue-50/20 transition">
                           <td className="px-8 py-5 font-bold text-slate-600 text-xs text-center">{l.date}</td>
                           <td className="px-6 py-5"><div className="font-black text-slate-700">{l.blockName}</div><div className="text-[10px] text-slate-400 font-bold lowercase tracking-tighter leading-none">{l.supervisorName}</div></td>
-                          <td className="px-6 py-5">{l.noCollection ? <span className="px-2 py-1 bg-red-100 text-red-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Gap</span> : <span className="px-2 py-1 bg-green-100 text-green-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Active</span>}</td>
+                          <td className="px-6 py-5">{l.noCollection ? <span className="px-2 py-1 bg-red-100 text-red-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Gap</span> : <span className="px-2 py-1 bg-green-100 text-green-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Collected</span>}</td>
                           <td className="px-6 py-5 font-black text-slate-700 text-center">{l.hhCovered}</td>
                           <td className="px-6 py-5 font-black text-blue-600 text-center">{l.noCollection ? 0 : l.hhGiving}</td>
                           <td className="px-6 py-5 font-black text-purple-600 text-center">{l.noCollection ? 0 : l.hhSegregating}</td>
@@ -574,7 +575,7 @@ const App = () => {
               <div className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase ml-1 tracking-widest">Ward Mapping</label><select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none" value={entryWard} onChange={(e) => {setEntryWard(e.target.value); setEntryBlock('');}}><option value="">Select Ward</option>{config.wards?.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></div>
-                  <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase ml-1 tracking-widest">Operating Unit</label><select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none" value={entryBlock} onChange={(e) => setEntryBlock(e.target.value)}><option value="">Select Block</option>{config.blocks?.filter(b => b.wardId === entryWard).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></div>
+                  <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase ml-1 tracking-widest">Operating Block</label><select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none" value={entryBlock} onChange={(e) => setEntryBlock(e.target.value)}><option value="">Select Block</option>{config.blocks?.filter(b => b.wardId === entryWard).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></div>
                 </div>
                 <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase text-center block tracking-widest tracking-widest">Collection Date</label><input type="date" className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none text-center" value={formData.date} onChange={(e) => setFormData({...formData, date: e.target.value})} /></div>
               </div>
@@ -591,7 +592,7 @@ const App = () => {
                   ))}
                 </div>
               )}
-              <button onClick={submitDailyLog} className="w-full bg-blue-600 text-white py-5 rounded-[24px] font-black text-lg shadow-xl active:scale-[0.98] transition-all">Submit Intake</button>
+              <button onClick={submitDailyLog} className="w-full bg-blue-600 text-white py-5 rounded-[24px] font-black text-lg shadow-xl transition active:scale-[0.98]">Submit Log</button>
             </div>
           </div>
         )}
@@ -599,14 +600,14 @@ const App = () => {
         {/* SETUP VIEW */}
         {activeTab === 'setup' && (
           <div className="max-w-4xl mx-auto py-6 space-y-8 animate-in slide-in-from-bottom-6">
-            <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800 tracking-tight">Operational Hierarchy</h1></header>
+            <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800 tracking-tight">Operational Setup</h1></header>
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
               <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><ShieldCheck className="text-blue-500"/> Team Access Mapping</h3></div>
               <div className="grid grid-cols-1 gap-4"><div className="flex flex-col sm:flex-row gap-2"><input id="new-user-email" placeholder="staff@saahas.org" className="flex-1 bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none" /><select id="new-user-role" className="bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none"><option value="supervisor">Supervisor</option><option value="coordinator">Coordinator</option><option value="manager">Manager</option></select><button onClick={() => { const em = document.getElementById('new-user-email').value; const rl = document.getElementById('new-user-role').value; if(em) updateUserRole(em, rl); }} className="bg-blue-600 text-white px-6 py-3 rounded-xl font-black active:scale-95 transition">Authorize Staff</button></div></div>
             </section>
             
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Users className="text-blue-500"/> Lead List</h3><button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Staff</button></div>
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Users className="text-blue-500"/> Supervisor List</h3><button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Staff</button></div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{config.supervisors?.map((fs, idx) => (<div key={fs.id} className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100 transition hover:bg-white hover:shadow-md"><input placeholder="Full Name" className="flex-1 bg-transparent border-none outline-none font-bold text-slate-700" value={fs.name} onChange={(e) => { const ns = [...config.supervisors]; ns[idx].name = e.target.value; setConfig({...config, supervisors: ns}); }} /><button onClick={() => removeSupervisor(fs.id)} className="text-red-400 hover:text-red-600 transition"><Trash2 size={18}/></button></div>))}</div>
             </section>
             
