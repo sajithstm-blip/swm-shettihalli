@@ -89,7 +89,7 @@ const App = () => {
   const [loading, setLoading] = useState(true);
   const [statusMsg, setStatusMsg] = useState({ type: '', text: '' });
   
-  // Filtering states
+  // Dashboard & Review Filters
   const [dashWard, setDashWard] = useState('all');
   const [dashBlocks, setDashBlocks] = useState([]); 
   const [dashSupervisor, setDashSupervisor] = useState('all');
@@ -116,33 +116,33 @@ const App = () => {
     reason: "Vehicle didn't come"
   });
 
-  // --- Authentication Flow ---
+  // --- Authentication Handlers ---
   const handleAuth = async (e) => {
     e.preventDefault();
+    
+    // Check for Firebase minimum password length
+    if (passInput.length < 6) {
+        showStatus('error', 'Password must be at least 6 characters long.');
+        return;
+    }
+
     setAuthLoading(true);
     const cleanEmail = emailInput.trim().toLowerCase();
     try {
       if (authMode === 'login') {
         await signInWithEmailAndPassword(auth, cleanEmail, passInput);
-        showStatus('success', 'Authenticated.');
+        showStatus('success', 'Logged in.');
       } else {
         await createUserWithEmailAndPassword(auth, cleanEmail, passInput);
-        // Automatically whitelist the primary admin in the background
-        if (cleanEmail === 'sajith.tm@saahas.org') {
-            try {
-                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', cleanEmail), {
-                    role: 'manager',
-                    updatedAt: new Date().toISOString()
-                });
-            } catch (e) { console.warn("Admin bootstrap background write delayed."); }
-        }
-        showStatus('success', 'Registration successful!');
+        showStatus('success', 'Account created! Welcome.');
       }
     } catch (error) {
       console.error(error);
-      const msg = error.code === 'auth/user-not-found' ? 'Account not found. Select "Create Account".' : 
-                  error.code === 'auth/wrong-password' ? 'Incorrect password.' :
-                  error.code === 'auth/email-already-in-use' ? 'This email is already registered.' : error.message;
+      let msg = error.message;
+      if (error.code === 'auth/user-not-found') msg = 'Account not found. Click "Create account" below.';
+      if (error.code === 'auth/wrong-password') msg = 'Incorrect password.';
+      if (error.code === 'auth/email-already-in-use') msg = 'This email is already registered. Please log in.';
+      if (error.code === 'auth/weak-password') msg = 'Password is too weak (min 6 characters).';
       showStatus('error', msg);
     } finally {
       setAuthLoading(false);
@@ -157,46 +157,43 @@ const App = () => {
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
-      if (u) {
-        setUser(u);
-        const email = u.email.toLowerCase();
-        
-        // --- BOOTSTRAP BYPASS: Ensures sajith.tm@saahas.org never hangs ---
-        if (email === 'sajith.tm@saahas.org') {
+      try {
+        if (u) {
+          setUser(u);
+          const email = u.email.toLowerCase();
+          
+          // --- ADMIN BYPASS: Instant access for the specified ID ---
+          if (email === 'sajith.tm@saahas.org') {
              setUserRole('manager');
              setRoleLoading(false);
-             setLoading(false);
-        } else {
+          } else {
              setRoleLoading(true);
-             try {
-               const roleRef = doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', email);
-               const roleSnap = await getDoc(roleRef);
-               if (roleSnap.exists()) {
-                 const role = roleSnap.data().role;
-                 setUserRole(role);
-                 if (role === 'supervisor') setActiveTab('entry');
-               } else {
-                 setUserRole('unauthorized');
-               }
-             } catch (err) {
-               console.error("Auth Listener DB Error:", err);
+             const roleRef = doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', email);
+             const roleSnap = await getDoc(roleRef);
+             if (roleSnap.exists()) {
+               const role = roleSnap.data().role;
+               setUserRole(role);
+               if (role === 'supervisor') setActiveTab('entry');
+             } else {
                setUserRole('unauthorized');
-             } finally {
-               setRoleLoading(false);
-               setLoading(false);
              }
+             setRoleLoading(false);
+          }
+        } else {
+          setUser(null);
+          setUserRole(null);
         }
-      } else {
-        setUser(null);
-        setUserRole(null);
+      } catch (err) {
+        console.error("Auth Listener Error:", err);
+        setUserRole('unauthorized');
+      } finally {
         setLoading(false);
-        setRoleLoading(false);
       }
     });
     return () => unsubscribe();
   }, []);
 
-  // --- Real-time Data Sync ---
+  // --- Data Sync ---
   useEffect(() => {
     if (!user || !userRole || userRole === 'unauthorized') return;
 
@@ -222,7 +219,7 @@ const App = () => {
     return () => { unsubConfig(); unsubData(); };
   }, [user, userRole]);
 
-  // --- UI and Logic Helpers ---
+  // --- Logic Helpers ---
   const showStatus = (type, text) => {
     setStatusMsg({ type, text: String(text) });
     setTimeout(() => setStatusMsg({ type: '', text: '' }), 5000);
@@ -233,9 +230,9 @@ const App = () => {
     try {
       const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'app_config', 'settings');
       await setDoc(configRef, newConfig);
-      showStatus('success', 'Operational hierarchy published!');
+      showStatus('success', 'Changes published to database.');
     } catch (e) {
-      showStatus('error', 'Update failed. Check Firestore rules.');
+      showStatus('error', 'Update failed.');
     }
   };
 
@@ -246,7 +243,7 @@ const App = () => {
       await setDoc(roleRef, { role, updatedAt: new Date().toISOString() });
       showStatus('success', `Permission assigned to ${email}`);
     } catch (e) {
-      showStatus('error', 'Failed to assign role.');
+      showStatus('error', 'Update failed.');
     }
   };
 
@@ -262,7 +259,7 @@ const App = () => {
   };
 
   const submitDailyLog = async () => {
-    if (!entryBlock) { showStatus('error', "Please select a Block."); return; }
+    if (!entryBlock) { showStatus('error', "Select Block."); return; }
     const block = config.blocks.find(b => b.id === entryBlock);
     const ward = config.wards.find(w => w.id === block?.wardId);
     const supervisor = config.supervisors.find(s => s.id === block?.supervisorId);
@@ -281,10 +278,10 @@ const App = () => {
         timestamp: new Date().toISOString(),
         enteredBy: user.email
       });
-      showStatus('success', 'Report submitted.');
+      showStatus('success', 'Data log saved.');
       setFormData({ ...formData, hhCovered: 0, hhGiving: 0, hhSegregating: 0, noCollection: false });
     } catch (e) {
-      showStatus('error', "Error submitting report.");
+      showStatus('error', "Error saving data.");
     }
   };
 
@@ -326,7 +323,7 @@ const App = () => {
 
   const handleExportCSV = () => {
     const exportLogs = dailyData.filter(l => l.date >= exportStart && l.date <= exportEnd);
-    if (exportLogs.length === 0) { showStatus('error', 'No data found for selected range.'); return; }
+    if (exportLogs.length === 0) { showStatus('error', 'No data found.'); return; }
     const headers = ["Date", "Ward", "Block", "Supervisor", "HH Covered", "Waste Given", "Waste Segregated", "Status", "Reason"];
     const logRows = exportLogs.sort((a,b) => a.date.localeCompare(b.date)).map(l => [
       l.date, l.wardName || 'N/A', l.blockName || 'N/A', l.supervisorName || 'Unassigned', l.hhCovered,
@@ -337,9 +334,9 @@ const App = () => {
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `SWM_Export_${exportStart}_to_${exportEnd}.csv`;
+    link.download = `SWM_Report_${exportStart}_to_${exportEnd}.csv`;
     link.click();
-    showStatus('success', 'Report Exported.');
+    showStatus('success', 'CSV Report Exported.');
   };
 
   // --- Views ---
@@ -371,7 +368,7 @@ const App = () => {
             <label className="text-[10px] font-black text-slate-400 uppercase ml-1">Password</label>
             <div className="relative">
               <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
-              <input type="password" placeholder="••••••••" required className="w-full pl-12 pr-4 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold outline-none" value={passInput} onChange={e => setPassInput(e.target.value)}/>
+              <input type="password" placeholder="min 6 characters" required className="w-full pl-12 pr-4 py-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold outline-none" value={passInput} onChange={e => setPassInput(e.target.value)}/>
             </div>
           </div>
           <button type="submit" disabled={authLoading} className="w-full bg-blue-600 text-white py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-blue-700 transition shadow-xl shadow-blue-100 active:scale-[0.98]">
@@ -382,13 +379,13 @@ const App = () => {
 
         <div className="text-center">
           <button onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')} className="text-sm font-bold text-blue-600 hover:underline transition">
-            {authMode === 'login' ? "New user? Create an account" : "Have an account? Log in"}
+            {authMode === 'login' ? "New staff member? Create account" : "Have an account? Log in"}
           </button>
         </div>
         
         {emailInput.toLowerCase() === 'sajith.tm@saahas.org' && authMode === 'register' && (
             <div className="p-4 bg-amber-50 border border-amber-100 rounded-2xl text-[10px] font-black text-amber-700 text-center uppercase tracking-widest leading-relaxed">
-                Administrator detected: Registration will grant full permissions.
+                Primary Administrator Detected: Use a password of at least 6 characters.
             </div>
         )}
       </div>
@@ -407,8 +404,8 @@ const App = () => {
       <div className="max-w-md w-full bg-white p-10 rounded-[40px] shadow-2xl text-center space-y-6">
         <AlertCircle size={64} className="text-red-500 mx-auto" />
         <h1 className="text-2xl font-black text-slate-800">Access Restricted</h1>
-        <p className="text-slate-500 font-medium">Authentication complete, but your account is not whitelisted for access. Contact <b>sajith.tm@saahas.org</b> for authorization.</p>
-        <button onClick={handleLogout} className="text-blue-600 font-bold hover:underline flex items-center gap-2 mx-auto"><LogOut size={16}/> Logout & Change ID</button>
+        <p className="text-slate-500 font-medium">Your email <b>{user.email}</b> is authenticated but not whitelisted. Please contact <b>sajith.tm@saahas.org</b> for authorization.</p>
+        <button onClick={handleLogout} className="text-blue-600 font-bold hover:underline flex items-center gap-2 mx-auto"><LogOut size={16}/> Sign Out & Try Again</button>
       </div>
     </div>
   );
@@ -437,6 +434,7 @@ const App = () => {
       </nav>
 
       <main className="flex-1 pt-6 px-4 md:pt-10 md:px-10 max-w-7xl overflow-x-hidden">
+        {/* DASHBOARD VIEW */}
         {activeTab === 'dashboard' && (
           <div className="space-y-6 animate-in fade-in duration-500">
             <header className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
@@ -483,7 +481,7 @@ const App = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-blue-50 text-blue-600 p-4 rounded-2xl"><Users size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none mb-1">HH Covered</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.covered.toLocaleString()}</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none mb-1">HH Area</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.covered.toLocaleString()}</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-indigo-50 text-indigo-600 p-4 rounded-2xl"><Truck size={28}/></div>
@@ -506,8 +504,8 @@ const App = () => {
               </div>
               <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100 flex flex-col justify-center items-center gap-4 text-center">
                  <div className="w-24 h-24 rounded-full bg-blue-50 flex items-center justify-center text-blue-600 mb-2"><TrendingUp size={48}/></div>
-                 <h4 className="font-black text-slate-800 text-lg uppercase tracking-tight">System Reliability</h4>
-                 <p className="text-slate-400 text-sm font-medium">Operation currently active across {config.blocks?.length || 0} units.</p>
+                 <h4 className="font-black text-slate-800 text-lg uppercase tracking-tight">Reliability Score</h4>
+                 <p className="text-slate-400 text-sm font-medium">Operation currently monitored across {config.blocks?.length || 0} active units.</p>
               </div>
             </div>
           </div>
@@ -517,14 +515,14 @@ const App = () => {
         {activeTab === 'review' && (
           <div className="space-y-6 animate-in slide-in-from-bottom-6">
             <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div><h1 className="text-3xl font-black text-slate-800 tracking-tight">Raw Data Audit</h1><p className="text-slate-500 font-medium">Validation of daily operational entries</p></div>
+              <div><h1 className="text-3xl font-black text-slate-800 tracking-tight">Raw Data Audit</h1><p className="text-slate-500 font-medium">Daily operational review</p></div>
               <div className="flex items-center gap-2 bg-white p-2 rounded-2xl border border-slate-200 shadow-sm"><input type="date" className="bg-transparent border-none p-1 font-bold text-xs" value={reviewStart} onChange={e => setReviewStart(e.target.value)} /><ArrowRight size={14} className="text-slate-300" /><input type="date" className="bg-transparent border-none p-1 font-bold text-xs" value={reviewEnd} onChange={e => setReviewEnd(e.target.value)} /></div>
             </header>
             <div className="bg-white rounded-[40px] shadow-sm border border-slate-100 overflow-hidden mb-12">
               <div className="overflow-x-auto">
                 <table className="w-full text-left">
                   <thead className="bg-slate-50 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                    <tr><th className="px-8 py-5">Date</th><th className="px-6 py-5">Block</th><th className="px-6 py-5">Status</th><th className="px-6 py-5 text-center">Covered</th><th className="px-6 py-5 text-center">Waste Given</th><th className="px-6 py-5 text-center">Waste Segregated</th><th className="px-6 py-5 text-center">Given Percentage</th><th className="px-6 py-5 text-center">Segregated Percentage</th></tr>
+                    <tr><th className="px-8 py-5">Date</th><th className="px-6 py-5">Block</th><th className="px-6 py-5">Status</th><th className="px-6 py-5 text-center">Covered</th><th className="px-6 py-5 text-center">Waste Given</th><th className="px-6 py-5 text-center">Waste Segregated</th><th className="px-6 py-5">Given Percentage</th><th className="px-6 py-5">Segregated Percentage</th></tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
                     {reviewTableData.map((l, i) => {
@@ -538,8 +536,8 @@ const App = () => {
                           <td className="px-6 py-5 font-black text-slate-700 text-center">{l.hhCovered}</td>
                           <td className="px-6 py-5 font-black text-blue-600 text-center">{l.noCollection ? 0 : l.hhGiving}</td>
                           <td className="px-6 py-5 font-black text-purple-600 text-center">{l.noCollection ? 0 : l.hhSegregating}</td>
-                          <td className="px-6 py-5 font-black text-slate-700 text-center">{l.noCollection ? '-' : `${givPct}%`}</td>
-                          <td className="px-6 py-5 font-black text-slate-700 text-center">{l.noCollection ? '-' : `${segPct}%`}</td>
+                          <td className="px-6 py-5 font-black text-slate-700">{l.noCollection ? '-' : `${givPct}%`}</td>
+                          <td className="px-6 py-5 font-black text-slate-700">{l.noCollection ? '-' : `${segPct}%`}</td>
                         </tr>
                       );
                     })}
@@ -560,7 +558,7 @@ const App = () => {
                   <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase ml-1 tracking-widest">Ward Mapping</label><select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none" value={entryWard} onChange={(e) => {setEntryWard(e.target.value); setEntryBlock('');}}><option value="">Select Ward</option>{config.wards?.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></div>
                   <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase ml-1 tracking-widest">Operating Unit</label><select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none" value={entryBlock} onChange={(e) => setEntryBlock(e.target.value)}><option value="">Select Block</option>{config.blocks?.filter(b => b.wardId === entryWard).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select></div>
                 </div>
-                <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase text-center block tracking-widest">Log Date</label><input type="date" className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none text-center" value={formData.date} onChange={(e) => setFormData({...formData, date: e.target.value})} /></div>
+                <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase text-center block tracking-widest">Collection Date</label><input type="date" className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none text-center" value={formData.date} onChange={(e) => setFormData({...formData, date: e.target.value})} /></div>
               </div>
               <div className="flex items-center gap-3 p-5 bg-red-50 rounded-3xl border border-red-100">
                 <input type="checkbox" id="noCollection" className="w-6 h-6 rounded-lg text-red-600 border-red-200" checked={formData.noCollection} onChange={(e) => setFormData({...formData, noCollection: e.target.checked})} />
@@ -575,7 +573,7 @@ const App = () => {
                   ))}
                 </div>
               )}
-              <button onClick={submitDailyLog} className="w-full bg-blue-600 text-white py-5 rounded-[24px] font-black text-lg shadow-xl transition active:scale-[0.98]">Publish Intake Log</button>
+              <button onClick={submitDailyLog} className="w-full bg-blue-600 text-white py-5 rounded-[24px] font-black text-lg shadow-xl active:scale-[0.98] transition-all">Submit Intake</button>
             </div>
           </div>
         )}
@@ -583,22 +581,19 @@ const App = () => {
         {/* SETUP VIEW */}
         {activeTab === 'setup' && (
           <div className="max-w-4xl mx-auto py-6 space-y-8 animate-in slide-in-from-bottom-6">
-            <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800 tracking-tight">Operational Setup</h1></header>
+            <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800 tracking-tight">Operational Hierarchy</h1></header>
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><ShieldCheck className="text-blue-500"/> Account Access Mapping</h3></div>
-              <div className="grid grid-cols-1 gap-4"><div className="flex flex-col sm:flex-row gap-2"><input id="new-user-email" placeholder="staff@saahas.org" className="flex-1 bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none" /><select id="new-user-role" className="bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none"><option value="supervisor">Supervisor (FS)</option><option value="coordinator">Coordinator (PC)</option><option value="manager">Project Manager</option></select><button onClick={() => { const em = document.getElementById('new-user-email').value; const rl = document.getElementById('new-user-role').value; if(em) updateUserRole(em, rl); }} className="bg-blue-600 text-white px-6 py-3 rounded-xl font-black active:scale-95 transition">Authorize Staff</button></div></div>
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><ShieldCheck className="text-blue-500"/> Team Access Mapping</h3></div>
+              <div className="grid grid-cols-1 gap-4"><div className="flex flex-col sm:flex-row gap-2"><input id="new-user-email" placeholder="staff@saahas.org" className="flex-1 bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none" /><select id="new-user-role" className="bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none"><option value="supervisor">Supervisor</option><option value="coordinator">Coordinator</option><option value="manager">Manager</option></select><button onClick={() => { const em = document.getElementById('new-user-email').value; const rl = document.getElementById('new-user-role').value; if(em) updateUserRole(em, rl); }} className="bg-blue-600 text-white px-6 py-3 rounded-xl font-black active:scale-95 transition">Authorize Staff</button></div></div>
             </section>
-            
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Users className="text-blue-500"/> Personnel List</h3><button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Staff</button></div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{config.supervisors?.map((fs, idx) => (<div key={fs.id} className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100 transition hover:bg-white hover:shadow-md"><input placeholder="Full Name" className="flex-1 bg-transparent border-none outline-none font-bold text-slate-700" value={fs.name} onChange={(e) => { const ns = [...config.supervisors]; ns[idx].name = e.target.value; setConfig({...config, supervisors: ns}); }} /><button onClick={() => removeSupervisor(fs.id)} className="text-red-400 hover:text-red-600 transition"><Trash2 size={18}/></button></div>))}</div>
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Users className="text-blue-500"/> Supervisor List</h3><button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Staff</button></div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{config.supervisors?.map((fs, idx) => (<div key={fs.id} className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100"><input placeholder="Name" className="flex-1 bg-transparent border-none outline-none font-bold text-slate-700" value={fs.name} onChange={(e) => { const ns = [...config.supervisors]; ns[idx].name = e.target.value; setConfig({...config, supervisors: ns}); }} /><button onClick={() => removeSupervisor(fs.id)} className="text-red-400 hover:text-red-600 transition"><Trash2 size={18}/></button></div>))}</div>
             </section>
-            
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Globe className="text-blue-500" /> Geography</h3><button onClick={() => setConfig({...config, states: [...config.states, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add State</button></div>
-              <div className="space-y-6">{config.states?.map((st, sIdx) => (<div key={st.id} className="border border-slate-100 rounded-[24px] overflow-hidden"><div className="bg-slate-50 p-4 flex items-center gap-4"><input className="flex-1 bg-transparent font-black text-blue-600 outline-none text-lg" placeholder="State" value={st.name} onChange={(e) => { const ns = [...config.states]; ns[sIdx].name = e.target.value; setConfig({...config, states: ns}); }} /><button onClick={() => setConfig({...config, wards: [...config.wards, { id: Date.now().toString(), stateId: st.id, name: '' }]})} className="text-[10px] bg-white border border-slate-200 px-3 py-1.5 rounded-lg font-bold">+ Ward</button><button onClick={() => setConfig({...config, states: config.states.filter(s => s.id !== st.id)})} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button></div><div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-2">{config.wards?.filter(w => w.stateId === st.id).map((wd) => (<div key={wd.id} className="flex items-center gap-2 bg-white border border-slate-100 p-2 rounded-xl"><input className="flex-1 text-sm font-bold outline-none" placeholder="Ward" value={wd.name} onChange={(e) => { const nw = [...config.wards]; const idx = config.wards.findIndex(w => w.id === wd.id); nw[idx].name = e.target.value; setConfig({...config, wards: nw}); }} /><button onClick={() => setConfig({...config, wards: config.wards.filter(w => w.id !== wd.id)})} className="text-red-400">&times;</button></div>))}</div></div>))}</div>
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Globe className="text-blue-500" /> Geography Mapping</h3><button onClick={() => setConfig({...config, states: [...config.states, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add State</button></div>
+              <div className="space-y-6">{config.states?.map((st, sIdx) => (<div key={st.id} className="border border-slate-100 rounded-[24px] overflow-hidden"><div className="bg-slate-50 p-4 flex items-center gap-4"><input className="flex-1 bg-transparent font-black text-blue-600 outline-none text-lg" placeholder="State Name" value={st.name} onChange={(e) => { const ns = [...config.states]; ns[sIdx].name = e.target.value; setConfig({...config, states: ns}); }} /><button onClick={() => setConfig({...config, wards: [...config.wards, { id: Date.now().toString(), stateId: st.id, name: '' }]})} className="text-[10px] bg-white border border-slate-200 px-3 py-1.5 rounded-lg font-bold">+ Ward</button><button onClick={() => setConfig({...config, states: config.states.filter(s => s.id !== st.id)})} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button></div><div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-2">{config.wards?.filter(w => w.stateId === st.id).map((wd) => (<div key={wd.id} className="flex items-center gap-2 bg-white border border-slate-100 p-2 rounded-xl"><input className="flex-1 text-sm font-bold outline-none" placeholder="Ward" value={wd.name} onChange={(e) => { const nw = [...config.wards]; const idx = config.wards.findIndex(w => w.id === wd.id); nw[idx].name = e.target.value; setConfig({...config, wards: nw}); }} /><button onClick={() => setConfig({...config, wards: config.wards.filter(w => w.id !== wd.id)})} className="text-red-400">&times;</button></div>))}</div></div>))}</div>
             </section>
-
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
               <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Database className="text-blue-500" /> Operational Units</h3><button onClick={() => setConfig({...config, blocks: [...config.blocks, { id: Date.now().toString(), name: '', wardId: '', supervisorId: '', totalHH: 0 }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Block</button></div>
               <div className="space-y-4">{config.blocks?.map((bl, bIdx) => (<div key={bl.id} className="bg-slate-50 p-5 rounded-[24px] border border-slate-100 space-y-4 transition hover:bg-slate-100/50"><div className="flex items-center gap-4"><input className="flex-1 bg-transparent font-black text-slate-800 outline-none text-lg border-b-2 border-slate-200 focus:border-blue-500 transition" placeholder="Block Name" value={bl.name} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].name = e.target.value; setConfig({...config, blocks: nb}); }} /><button onClick={() => setConfig({...config, blocks: config.blocks.filter(b => b.id !== bl.id)})} className="text-red-400"><Trash2 size={16}/></button></div><div className="grid grid-cols-2 md:grid-cols-3 gap-4"><select className="bg-white border border-slate-200 rounded-lg p-2 text-xs font-bold outline-none" value={bl.wardId} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].wardId = e.target.value; setConfig({...config, blocks: nb}); }}><option value="">Ward</option>{config.wards?.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select><select className="bg-white border border-slate-200 rounded-lg p-2 text-xs font-bold outline-none" value={bl.supervisorId} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].supervisorId = e.target.value; setConfig({...config, blocks: nb}); }}><option value="">Lead</option>{config.supervisors?.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select><div className="flex items-center gap-2"><label className="text-[10px] font-black text-slate-400 uppercase leading-none">Total HH</label><input type="number" className="w-full bg-white border border-slate-200 rounded-lg p-2 font-black text-xs" value={bl.totalHH} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].totalHH = Number(e.target.value); setConfig({...config, blocks: nb}); }} /></div></div></div>))}</div>
@@ -611,7 +606,7 @@ const App = () => {
   );
 };
 
-// AUTO-RENDER FOR DEPLOYMENT (Ensures browser mounts correctly on Vercel)
+// AUTO-RENDER FOR DEPLOYMENT
 const rootElement = document.getElementById('root');
 if (rootElement) {
   const root = ReactDOM.createRoot(rootElement);
