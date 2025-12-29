@@ -50,6 +50,7 @@ import {
 
 /**
  * --- Firebase Configuration ---
+ * Project: admob-app-id-4497163742
  */
 const isCanvas = typeof __firebase_config !== 'undefined';
 const firebaseConfig = isCanvas 
@@ -66,14 +67,13 @@ const firebaseConfig = isCanvas
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const googleProvider = new GoogleAuthProvider();
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'swm-national-v1'; 
 
 const formatDate = (date) => date.toISOString().split('T')[0];
 
 const App = () => {
   const [user, setUser] = useState(null);
-  const [userRole, setUserRole] = useState(null);
+  const [userRole, setUserRole] = useState(null); // 'manager', 'coordinator', 'supervisor'
   const [emailInput, setEmailInput] = useState('');
   const [isLinkSent, setIsLinkSent] = useState(false);
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -117,13 +117,13 @@ const App = () => {
   // --- Auth Logic: Passwordless Email Link ---
   const handleSendLink = async (e) => {
     e.preventDefault();
-    if (!emailInput.endsWith('@saahas.org')) {
+    if (!emailInput.toLowerCase().endsWith('@saahas.org')) {
       showStatus('error', 'Only @saahas.org emails are permitted.');
       return;
     }
 
     const actionCodeSettings = {
-      url: window.location.href, // Returns user back to the current page
+      url: window.location.origin + window.location.pathname,
       handleCodeInApp: true,
     };
 
@@ -131,10 +131,10 @@ const App = () => {
       await sendSignInLinkToEmail(auth, emailInput, actionCodeSettings);
       window.localStorage.setItem('emailForSignIn', emailInput);
       setIsLinkSent(true);
-      showStatus('success', 'Sign-in link sent to your email!');
+      showStatus('success', 'Check your inbox for the login link!');
     } catch (error) {
       console.error(error);
-      showStatus('error', 'Failed to send link. Check Firebase Console settings.');
+      showStatus('error', 'Failed to send link. Verify Firebase Email Link settings.');
     }
   };
 
@@ -144,35 +144,41 @@ const App = () => {
   };
 
   useEffect(() => {
-    // 1. Check if the user is returning from their email link
+    // 1. Handle Link Arrival
     if (isSignInWithEmailLink(auth, window.location.href)) {
       let email = window.localStorage.getItem('emailForSignIn');
       if (!email) {
-        email = window.prompt('Please provide your email for confirmation');
+        email = window.prompt('Please confirm your @saahas.org email');
       }
-      signInWithEmailLink(auth, email, window.location.href)
-        .then(() => {
-          window.localStorage.removeItem('emailForSignIn');
-          window.history.replaceState(null, null, window.location.pathname);
-          showStatus('success', 'Successfully logged in!');
-        })
-        .catch((err) => {
-          showStatus('error', 'Link expired or invalid.');
-          console.error(err);
-        });
+      if (email) {
+        signInWithEmailLink(auth, email, window.location.href)
+          .then(() => {
+            window.localStorage.removeItem('emailForSignIn');
+            window.history.replaceState(null, null, window.location.pathname);
+            showStatus('success', 'Logged in successfully!');
+          })
+          .catch((err) => {
+            showStatus('error', 'The sign-in link is invalid or expired.');
+          });
+      }
     }
 
-    // 2. Listen for Auth State
+    // 2. Role Monitoring
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
       if (u) {
         setUser(u);
-        const roleRef = doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', u.email.toLowerCase());
-        const roleSnap = await getDoc(roleRef);
-        if (roleSnap.exists()) {
-          const role = roleSnap.data().role;
-          setUserRole(role);
-          if (role === 'supervisor') setActiveTab('entry');
-        } else {
+        try {
+          const roleRef = doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', u.email.toLowerCase());
+          const roleSnap = await getDoc(roleRef);
+          if (roleSnap.exists()) {
+            const role = roleSnap.data().role;
+            setUserRole(role);
+            if (role === 'supervisor') setActiveTab('entry');
+          } else {
+            setUserRole('unauthorized');
+          }
+        } catch (err) {
+          console.error("Role Fetch Error:", err);
           setUserRole('unauthorized');
         }
       } else {
@@ -186,21 +192,27 @@ const App = () => {
 
   // --- Data Sync ---
   useEffect(() => {
-    if (!user || userRole === 'unauthorized' || userRole === null) return;
+    if (!user || !userRole || userRole === 'unauthorized') return;
 
     const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'app_config', 'settings');
     const unsubConfig = onSnapshot(configRef, (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
-        setConfig(prev => ({ ...prev, ...data }));
+        setConfig(prev => ({ 
+          ...prev, 
+          states: data.states || [],
+          wards: data.wards || [],
+          blocks: data.blocks || [],
+          supervisors: data.supervisors || []
+        }));
       }
-    });
+    }, (err) => showStatus('error', 'Config sync failed. Check permissions.'));
 
     const dataRef = collection(db, 'artifacts', appId, 'public', 'data', 'daily_logs');
     const unsubData = onSnapshot(query(dataRef), (snapshot) => {
       const logs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setDailyData(logs);
-    });
+    }, (err) => showStatus('error', 'Data sync failed. Check permissions.'));
 
     return () => { unsubConfig(); unsubData(); };
   }, [user, userRole]);
@@ -216,9 +228,9 @@ const App = () => {
     try {
       const configRef = doc(db, 'artifacts', appId, 'public', 'data', 'app_config', 'settings');
       await setDoc(configRef, newConfig);
-      showStatus('success', 'Project settings updated!');
+      showStatus('success', 'Changes saved to cloud.');
     } catch (e) {
-      showStatus('error', 'Save failed.');
+      showStatus('error', 'Permission denied.');
     }
   };
 
@@ -266,14 +278,14 @@ const App = () => {
         timestamp: new Date().toISOString(),
         enteredBy: user.email
       });
-      showStatus('success', `Data saved for ${block.name}`);
+      showStatus('success', `Report saved for ${block.name}`);
       setFormData({ ...formData, hhCovered: 0, hhGiving: 0, hhSegregating: 0, noCollection: false });
     } catch (e) {
-      showStatus('error', "Database error.");
+      showStatus('error', "Database connection error.");
     }
   };
 
-  // --- Analytics & Formatting ---
+  // --- Analytics & Review ---
   const filteredLogs = useMemo(() => {
     return dailyData.filter(log => {
       const wardMatch = dashWard === 'all' || log.wardId === dashWard;
@@ -316,41 +328,9 @@ const App = () => {
         groups[key].seg += Number(log.hhSegregating || 0);
       }
     });
-    // Strict chronological sort to prevent Recharts rendering bugs/duplicates
     return Object.values(groups).sort((a, b) => a.rawDate.localeCompare(b.rawDate));
   }, [filteredLogs, viewTimeframe]);
 
-  const gapData = useMemo(() => {
-    const reasons = {};
-    filteredLogs.filter(l => l.noCollection).forEach(l => {
-      reasons[l.reason] = (reasons[l.reason] || 0) + 1;
-    });
-    return Object.entries(reasons).map(([name, value]) => ({ name, value }));
-  }, [filteredLogs]);
-
-  const performanceTable = useMemo(() => {
-    return config.blocks
-      .filter(b => (dashWard === 'all' || b.wardId === dashWard) && (dashBlocks.length === 0 || dashBlocks.includes(b.id)))
-      .map(block => {
-        const logs = filteredLogs.filter(d => d.blockId === block.id);
-        const valid = logs.filter(l => !l.noCollection);
-        const totalCovered = logs.reduce((s, l) => s + Number(l.hhCovered || 0), 0);
-        const totalGiving = valid.reduce((s, l) => s + Number(l.hhGiving || 0), 0);
-        const totalSeg = valid.reduce((s, l) => s + Number(l.hhSegregating || 0), 0);
-        const supervisor = config.supervisors.find(s => s.id === block.supervisorId);
-        return {
-          name: block.name,
-          ward: config.wards.find(w => w.id === block.wardId)?.name || 'N/A',
-          supervisor: supervisor?.name || 'Unassigned',
-          covered: totalCovered,
-          giving: totalGiving,
-          seg: totalSeg,
-          rate: totalGiving > 0 ? ((totalSeg / totalGiving) * 100).toFixed(1) : 0
-        };
-      });
-  }, [filteredLogs, config, dashWard, dashBlocks]);
-
-  // --- Executive Report Logic ---
   const handleExportCSV = () => {
     const exportLogs = dailyData.filter(l => l.date >= exportStart && l.date <= exportEnd);
     if (exportLogs.length === 0) { showStatus('error', 'No data for range.'); return; }
@@ -362,6 +342,7 @@ const App = () => {
       l.noCollection ? "Absent" : "Collected", l.noCollection ? `"${l.reason}"` : ""
     ]);
 
+    // Summary Helpers
     const calculateStats = (data) => {
       const cov = data.reduce((s,l) => s + Number(l.hhCovered || 0), 0);
       const giv = data.reduce((s,l) => s + (l.noCollection ? 0 : Number(l.hhGiving || 0)), 0);
@@ -393,53 +374,46 @@ const App = () => {
       });
     };
 
-    const summaryHeader = ["Summary Period", "Avg Giving (%)", "Avg Segregation (%)"];
-    const weeklySummary = aggregate('W').map(row => ["Weekly Average", ...row]);
-    const monthlySummary = aggregate('M').map(row => ["Monthly Average", ...row]);
-    const quarterlySummary = aggregate('Q').map(row => ["Quarterly Average", ...row]);
-    const yearlySummary = aggregate('Y').map(row => ["Yearly Average", ...row]);
+    const summaryHeader = ["Summary Type", "Period Name", "Avg Giving (%)", "Avg Segregation (%)"];
+    const summaries = [
+      ...aggregate('W').map(r => ["Weekly Avg", ...r]),
+      ...aggregate('M').map(r => ["Monthly Avg", ...r]),
+      ...aggregate('Q').map(r => ["Quarterly Avg", ...r]),
+      ...aggregate('Y').map(r => ["Yearly Avg", ...r])
+    ];
 
-    const csvContent = [
-      headers,
-      ...logRows,
-      [],
-      ["AVERAGE PERFORMANCE ANALYSIS (SELECTED RANGE)"],
-      summaryHeader,
-      ...weeklySummary,
-      ...monthlySummary,
-      ...quarterlySummary,
-      ...yearlySummary
-    ].map(e => e.join(",")).join("\n");
+    const csvContent = [headers, ...logRows, [], ["PERIODICAL ANALYSIS"], summaryHeader, ...summaries]
+      .map(e => e.join(",")).join("\n");
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `SWM_Detailed_Report_${exportStart}_to_${exportEnd}.csv`;
+    link.download = `SWM_Report_${exportStart}_to_${exportEnd}.csv`;
     link.click();
-    showStatus('success', 'Report Downloaded.');
+    showStatus('success', 'Report Exported.');
   };
 
   // --- Views ---
   if (loading) return (
     <div className="flex flex-col items-center justify-center h-screen bg-slate-50 gap-4">
       <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-      <p className="text-slate-500 font-medium">Authenticating System...</p>
+      <p className="text-slate-500 font-medium">Synchronizing Saahas SWM...</p>
     </div>
   );
 
   if (!user) return (
     <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
-      <div className="max-w-md w-full bg-white p-10 rounded-[40px] shadow-2xl space-y-8">
+      <div className="max-w-md w-full bg-white p-10 rounded-[40px] shadow-2xl space-y-8 animate-in fade-in">
         <div className="bg-blue-50 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto text-blue-600"><Globe size={40} /></div>
         <div className="text-center">
           <h1 className="text-3xl font-black text-slate-800">Saahas SWM</h1>
-          <p className="text-slate-500 mt-2 font-medium">Secure Passwordless Login</p>
+          <p className="text-slate-500 mt-2 font-medium">Organization Authentication</p>
         </div>
 
         {!isLinkSent ? (
           <form onSubmit={handleSendLink} className="space-y-4">
             <div className="space-y-1">
-              <label className="text-[10px] font-black text-slate-400 uppercase ml-1">Email Address</label>
+              <label className="text-[10px] font-black text-slate-400 uppercase ml-1">Work Email</label>
               <div className="relative">
                 <Mail className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
                 <input 
@@ -452,15 +426,15 @@ const App = () => {
                 />
               </div>
             </div>
-            <button type="submit" className="w-full bg-blue-600 text-white py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-blue-700 transition shadow-xl shadow-blue-100">
-              <Send size={18} /> Get Login Link
+            <button type="submit" className="w-full bg-blue-600 text-white py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-blue-700 transition shadow-xl">
+              <Send size={18} /> Get Sign-In Link
             </button>
           </form>
         ) : (
-          <div className="p-6 bg-green-50 border border-green-100 rounded-3xl text-center space-y-4">
+          <div className="p-6 bg-green-50 border border-green-100 rounded-3xl text-center space-y-4 animate-in zoom-in-95">
             <CheckCircle2 size={48} className="text-green-500 mx-auto" />
-            <p className="font-bold text-green-800 leading-tight">We've sent a sign-in link to <b>{emailInput}</b>. Check your inbox to continue.</p>
-            <button onClick={() => setIsLinkSent(false)} className="text-xs font-bold text-green-600 underline">Enter a different email</button>
+            <p className="font-bold text-green-800">Link sent to <b>{emailInput}</b>. Check your inbox to complete sign-in.</p>
+            <button onClick={() => setIsLinkSent(false)} className="text-xs font-bold text-green-600 underline">Use a different email</button>
           </div>
         )}
       </div>
@@ -471,9 +445,9 @@ const App = () => {
     <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
       <div className="max-w-md w-full bg-white p-10 rounded-[40px] shadow-2xl text-center space-y-6">
         <AlertCircle size={64} className="text-red-500 mx-auto" />
-        <h1 className="text-2xl font-black text-slate-800">Account Restricted</h1>
-        <p className="text-slate-500 font-medium">Email <b>{user.email}</b> is authenticated but not authorized to view this data. Please contact your Project Manager.</p>
-        <button onClick={handleLogout} className="text-blue-600 font-bold hover:underline">Sign out and switch account</button>
+        <h1 className="text-2xl font-black text-slate-800">Access Restricted</h1>
+        <p className="text-slate-500 font-medium">Your email <b>{user.email}</b> is not authorized. Please contact your Manager.</p>
+        <button onClick={handleLogout} className="text-blue-600 font-bold hover:underline">Switch Account</button>
       </div>
     </div>
   );
@@ -509,8 +483,8 @@ const App = () => {
         )}
         <div className="mt-auto hidden md:block pt-6 border-t border-slate-100">
           <div className="flex items-center gap-3 px-4 py-2 mb-4">
-            <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold text-xs">{user.email[0].toUpperCase()}</div>
-            <div className="flex flex-col"><span className="text-xs font-black text-slate-700 truncate max-w-[120px]">{user.email.split('@')[0]}</span><span className="text-[9px] font-bold text-slate-400 uppercase">{userRole}</span></div>
+            <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold text-xs">{user?.email?.[0]?.toUpperCase()}</div>
+            <div className="flex flex-col"><span className="text-xs font-black text-slate-700 truncate max-w-[120px]">{user?.email?.split('@')[0]}</span><span className="text-[9px] font-bold text-slate-400 uppercase">{userRole}</span></div>
           </div>
           <button onClick={handleLogout} className="w-full flex items-center gap-3 px-4 py-3 text-red-500 font-bold hover:bg-red-50 rounded-2xl transition"><LogOut size={18} /> Logout</button>
         </div>
@@ -520,7 +494,7 @@ const App = () => {
         {activeTab === 'dashboard' && (
           <div className="space-y-6 animate-in fade-in duration-500">
             <header className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
-              <div><h1 className="text-3xl font-bold tracking-tight text-slate-800">SWM Intelligence</h1><p className="text-slate-500 font-medium">National footprint overview</p></div>
+              <div><h1 className="text-3xl font-bold tracking-tight text-slate-800">SWM Intelligence</h1><p className="text-slate-500 font-medium">Operations performance overview</p></div>
               <div className="bg-white p-4 rounded-[28px] border border-slate-200 shadow-sm flex flex-col sm:flex-row items-center gap-4">
                 <div className="flex items-center gap-2">
                   <input type="date" className="bg-slate-50 border-none rounded-lg p-1.5 text-[11px] font-bold outline-none" value={exportStart} onChange={e => setExportStart(e.target.value)} />
@@ -539,21 +513,21 @@ const App = () => {
                   <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Ward</label>
                   <select className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-sm outline-none font-semibold" value={dashWard} onChange={(e) => {setDashWard(e.target.value); setDashBlocks([]);}}>
                     <option value="all">All Wards</option>
-                    {config.wards.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+                    {config.wards?.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
                   </select>
                 </div>
                 <div className="space-y-1">
                   <label className="text-[10px] font-bold text-slate-400 uppercase ml-1 flex justify-between"><span>Blocks (Multi)</span> {dashBlocks.length > 0 && <button onClick={() => setDashBlocks([])} className="text-blue-500 text-[9px] hover:underline">Clear</button>}</label>
                   <div className="max-h-32 overflow-y-auto bg-slate-50 border border-slate-200 rounded-xl p-2 space-y-1">
-                    {config.blocks.filter(b => dashWard === 'all' || b.wardId === dashWard).map(block => (
-                      <button key={block.id} onClick={() => toggleBlockFilter(block.id)} className={`flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-xs font-bold transition-all ${dashBlocks.includes(block.id) ? 'bg-blue-600 text-white' : 'hover:bg-slate-200 text-slate-600'}`}>
+                    {config.blocks?.filter(b => dashWard === 'all' || b.wardId === dashWard).map(block => (
+                      <button key={block.id} onClick={() => toggleBlockFilter(block.id)} className={`flex items-center gap-2 w-full px-2 py-1.5 rounded-lg text-xs font-bold transition-all ${dashBlocks.includes(block.id) ? 'bg-blue-600 text-white shadow-sm' : 'hover:bg-slate-200 text-slate-600'}`}>
                         {dashBlocks.includes(block.id) ? <CheckSquare size={14}/> : <Square size={14}/>} <span className="truncate">{block.name}</span>
                       </button>
                     ))}
                   </div>
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">Analysis View</label>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">View</label>
                   <div className="flex bg-slate-50 border border-slate-200 rounded-xl p-1 gap-1">
                     {['daily', 'weekly', 'monthly'].map(t => (<button key={t} onClick={() => setViewTimeframe(t)} className={`flex-1 py-1.5 rounded-lg text-[10px] font-black capitalize transition ${viewTimeframe === t ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'}`}>{t}</button>))}
                   </div>
@@ -568,15 +542,15 @@ const App = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-blue-50 text-blue-600 p-4 rounded-2xl"><Users size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Service Area</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.covered.toLocaleString()}</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">HH Area</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.covered.toLocaleString()}</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-indigo-50 text-indigo-600 p-4 rounded-2xl"><Truck size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Participation</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.covered > 0 ? (stats.giving/stats.covered*100).toFixed(1) : 0)}%</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Giving Waste</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.covered > 0 ? (stats.giving/stats.covered*100).toFixed(1) : 0)}%</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-green-50 text-green-600 p-4 rounded-2xl"><CheckCircle2 size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Quality Score</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.giving > 0 ? ((stats.seg / stats.giving) * 100).toFixed(1) : 0)}%</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Efficiency</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.giving > 0 ? ((stats.seg / stats.giving) * 100).toFixed(1) : 0)}%</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-red-50 text-red-600 p-4 rounded-2xl"><Ban size={28}/></div>
@@ -586,7 +560,7 @@ const App = () => {
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2 bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
-                <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8"><History className="text-blue-500" size={20}/> Coverage Timeline</h3>
+                <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8"><History className="text-blue-500" size={20}/> Performance Timeline</h3>
                 <div className="h-80">
                   <ResponsiveContainer width="100%" height="100%">
                     <AreaChart data={timeSeriesData}>
@@ -606,11 +580,11 @@ const App = () => {
                 </div>
               </div>
               <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
-                <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8"><Ban className="text-red-500" size={20}/> Failure Gaps</h3>
+                <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8"><Ban className="text-red-500" size={20}/> Gap Analysis</h3>
                 {gapData.length > 0 ? (
                   <div className="h-80"><ResponsiveContainer width="100%" height="100%"><BarChart data={gapData} layout="vertical"><CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f1f5f9" /><XAxis type="number" hide /><YAxis dataKey="name" type="category" axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#64748b', fontWeight: 'bold'}} width={120} /><Tooltip cursor={{fill: '#f8fafc'}} contentStyle={{ borderRadius: '15px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} /><Bar dataKey="value" name="Incidents" radius={[0, 10, 10, 0]}>{gapData.map((_, index) => <Cell key={index} fill={['#ef4444', '#f97316', '#f59e0b', '#84cc16'][index % 4]} />)}</Bar></BarChart></ResponsiveContainer></div>
                 ) : (
-                  <div className="h-full flex flex-col items-center justify-center text-center opacity-30"><CheckCircle2 size={64} className="text-green-500"/><p className="font-bold text-sm mt-3">Perfect Performance!</p></div>
+                  <div className="h-full flex flex-col items-center justify-center text-center opacity-30"><CheckCircle2 size={64} className="text-green-500"/><p className="font-bold text-sm mt-3">All Active!</p></div>
                 )}
               </div>
             </div>
@@ -620,32 +594,28 @@ const App = () => {
         {activeTab === 'review' && (
           <div className="space-y-6 animate-in slide-in-from-bottom-6">
             <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <div><h1 className="text-3xl font-black text-slate-800">Raw Data Audit</h1><p className="text-slate-500 font-medium">Operational entry review</p></div>
+              <div><h1 className="text-3xl font-black text-slate-800">Raw Data Audit</h1><p className="text-slate-500 font-medium">Daily operational review</p></div>
               <div className="flex items-center gap-2 bg-white p-2 rounded-2xl border border-slate-200 shadow-sm"><input type="date" className="bg-transparent border-none p-1 font-bold text-xs" value={reviewStart} onChange={e => setReviewStart(e.target.value)} /><ArrowRight size={14} className="text-slate-300" /><input type="date" className="bg-transparent border-none p-1 font-bold text-xs" value={reviewEnd} onChange={e => setReviewEnd(e.target.value)} /></div>
             </header>
             <div className="bg-white rounded-[40px] shadow-sm border border-slate-100 overflow-hidden mb-12">
               <div className="overflow-x-auto">
                 <table className="w-full text-left">
                   <thead className="bg-slate-50 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                    <tr><th className="px-8 py-5">Date</th><th className="px-6 py-5">Block</th><th className="px-6 py-5">Status</th><th className="px-6 py-5 text-center">Covered</th><th className="px-6 py-5 text-center">Waste Given</th><th className="px-6 py-5 text-center">Waste Segregated</th><th className="px-6 py-5">Given Percentage</th><th className="px-6 py-5">Segregated Percentage</th></tr>
+                    <tr><th className="px-8 py-5">Date</th><th className="px-6 py-5">Block</th><th className="px-6 py-5">Status</th><th className="px-6 py-5 text-center">Covered</th><th className="px-6 py-5 text-center">Waste Given</th><th className="px-6 py-5 text-center">Waste Segregated</th><th className="px-6 py-5">Given %</th><th className="px-6 py-5">Segregated %</th></tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
-                    {reviewTableData.map((l, i) => {
-                      const givPct = l.hhCovered > 0 ? (l.hhGiving/l.hhCovered*100).toFixed(1) : 0;
-                      const segPct = l.hhGiving > 0 ? (l.hhSegregating/l.hhGiving*100).toFixed(1) : 0;
-                      return (
-                        <tr key={i} className="hover:bg-blue-50/20 transition">
-                          <td className="px-8 py-5 font-bold text-slate-600 text-xs">{l.date}</td>
-                          <td className="px-6 py-5"><div className="font-black text-slate-700">{l.blockName}</div><div className="text-[10px] text-slate-400 font-bold">{l.supervisorName}</div></td>
-                          <td className="px-6 py-5">{l.noCollection ? <span className="px-2 py-1 bg-red-100 text-red-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Gap</span> : <span className="px-2 py-1 bg-green-100 text-green-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Active</span>}</td>
-                          <td className="px-6 py-5 font-black text-slate-700 text-center">{l.hhCovered}</td>
-                          <td className="px-6 py-5 font-black text-blue-600 text-center">{l.noCollection ? 0 : l.hhGiving}</td>
-                          <td className="px-6 py-5 font-black text-purple-600 text-center">{l.noCollection ? 0 : l.hhSegregating}</td>
-                          <td className="px-6 py-5 font-black text-slate-700">{l.noCollection ? '-' : `${givPct}%`}</td>
-                          <td className="px-6 py-5 font-black text-slate-700">{l.noCollection ? '-' : `${segPct}%`}</td>
-                        </tr>
-                      );
-                    })}
+                    {reviewTableData.map((l, i) => (
+                      <tr key={i} className="hover:bg-blue-50/20 transition">
+                        <td className="px-8 py-5 font-bold text-slate-600 text-xs">{l.date}</td>
+                        <td className="px-6 py-5"><div className="font-black text-slate-700">{l.blockName}</div><div className="text-[10px] text-slate-400 font-bold">{l.supervisorName}</div></td>
+                        <td className="px-6 py-5">{l.noCollection ? <span className="px-2 py-1 bg-red-100 text-red-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Gap</span> : <span className="px-2 py-1 bg-green-100 text-green-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Active</span>}</td>
+                        <td className="px-6 py-5 font-black text-slate-700 text-center">{l.hhCovered}</td>
+                        <td className="px-6 py-5 font-black text-blue-600 text-center">{l.noCollection ? 0 : l.hhGiving}</td>
+                        <td className="px-6 py-5 font-black text-purple-600 text-center">{l.noCollection ? 0 : l.hhSegregating}</td>
+                        <td className="px-6 py-5 font-black text-slate-700">{l.noCollection ? '-' : `${l.hhCovered > 0 ? (l.hhGiving/l.hhCovered*100).toFixed(1) : 0}%`}</td>
+                        <td className="px-6 py-5 font-black text-slate-700">{l.noCollection ? '-' : `${l.hhGiving > 0 ? (l.hhSegregating/l.hhGiving*100).toFixed(1) : 0}%`}</td>
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
               </div>
@@ -655,7 +625,7 @@ const App = () => {
 
         {activeTab === 'entry' && (
           <div className="max-w-xl mx-auto py-6 animate-in slide-in-from-bottom-6">
-            <header className="text-center mb-8"><h1 className="text-2xl font-black text-slate-800">Field Submission</h1></header>
+            <header className="text-center mb-8"><h1 className="text-2xl font-black text-slate-800">Daily Entry</h1></header>
             <div className="bg-white p-8 rounded-[40px] shadow-2xl border border-slate-100 space-y-6">
               <div className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
@@ -663,14 +633,14 @@ const App = () => {
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Ward Mapping</label>
                     <select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none" value={entryWard} onChange={(e) => {setEntryWard(e.target.value); setEntryBlock('');}}>
                       <option value="">Select Ward</option>
-                      {config.wards.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+                      {config.wards?.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
                     </select>
                   </div>
                   <div className="space-y-1">
                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Operating Unit</label>
                     <select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-slate-50 font-bold outline-none" value={entryBlock} onChange={(e) => setEntryBlock(e.target.value)}>
                       <option value="">Select Block</option>
-                      {config.blocks.filter(b => b.wardId === entryWard).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                      {config.blocks?.filter(b => b.wardId === entryWard).map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
                     </select>
                   </div>
                 </div>
@@ -698,20 +668,20 @@ const App = () => {
           <div className="max-w-4xl mx-auto py-6 space-y-8 animate-in slide-in-from-bottom-6">
             <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800">Operational Hierarchy</h1></header>
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><ShieldCheck className="text-blue-500"/> Account Access Mapping</h3></div>
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><ShieldCheck className="text-blue-500"/> Team Access Mapping</h3></div>
               <div className="grid grid-cols-1 gap-4"><div className="flex flex-col sm:flex-row gap-2"><input id="new-user-email" placeholder="staff@saahas.org" className="flex-1 bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none" /><select id="new-user-role" className="bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none"><option value="supervisor">Supervisor</option><option value="coordinator">Coordinator</option><option value="manager">Manager</option></select><button onClick={() => { const em = document.getElementById('new-user-email').value; const rl = document.getElementById('new-user-role').value; if(em) updateUserRole(em, rl); }} className="bg-blue-600 text-white px-6 py-3 rounded-xl font-black">Authorize</button></div></div>
             </section>
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
               <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Users className="text-blue-500"/> Team List</h3><button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Staff</button></div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{config.supervisors.map((fs, idx) => (<div key={fs.id} className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100"><input placeholder="Name" className="flex-1 bg-transparent border-none outline-none font-bold text-slate-700" value={fs.name} onChange={(e) => { const ns = [...config.supervisors]; ns[idx].name = e.target.value; setConfig({...config, supervisors: ns}); }} /><button onClick={() => removeSupervisor(fs.id)} className="text-red-400 hover:text-red-600 transition"><Trash2 size={18}/></button></div>))}</div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{config.supervisors?.map((fs, idx) => (<div key={fs.id} className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100"><input placeholder="Name" className="flex-1 bg-transparent border-none outline-none font-bold text-slate-700" value={fs.name} onChange={(e) => { const ns = [...config.supervisors]; ns[idx].name = e.target.value; setConfig({...config, supervisors: ns}); }} /><button onClick={() => removeSupervisor(fs.id)} className="text-red-400 hover:text-red-600 transition"><Trash2 size={18}/></button></div>))}</div>
             </section>
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
               <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Globe className="text-blue-500" /> Geography Mapping</h3><button onClick={() => setConfig({...config, states: [...config.states, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add State</button></div>
-              <div className="space-y-6">{config.states.map((st, sIdx) => (<div key={st.id} className="border border-slate-100 rounded-[24px] overflow-hidden"><div className="bg-slate-50 p-4 flex items-center gap-4"><input className="flex-1 bg-transparent font-black text-blue-600 outline-none text-lg" placeholder="State" value={st.name} onChange={(e) => { const ns = [...config.states]; ns[sIdx].name = e.target.value; setConfig({...config, states: ns}); }} /><button onClick={() => setConfig({...config, wards: [...config.wards, { id: Date.now().toString(), stateId: st.id, name: '' }]})} className="text-[10px] bg-white border border-slate-200 px-3 py-1.5 rounded-lg font-bold">+ Ward</button><button onClick={() => setConfig({...config, states: config.states.filter(s => s.id !== st.id)})} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button></div><div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-2">{config.wards.filter(w => w.stateId === st.id).map((wd) => (<div key={wd.id} className="flex items-center gap-2 bg-white border border-slate-100 p-2 rounded-xl"><input className="flex-1 text-sm font-bold outline-none" placeholder="Ward" value={wd.name} onChange={(e) => { const nw = [...config.wards]; const idx = config.wards.findIndex(w => w.id === wd.id); nw[idx].name = e.target.value; setConfig({...config, wards: nw}); }} /><button onClick={() => setConfig({...config, wards: config.wards.filter(w => w.id !== wd.id)})} className="text-red-400">&times;</button></div>))}</div></div>))}</div>
+              <div className="space-y-6">{config.states?.map((st, sIdx) => (<div key={st.id} className="border border-slate-100 rounded-[24px] overflow-hidden"><div className="bg-slate-50 p-4 flex items-center gap-4"><input className="flex-1 bg-transparent font-black text-blue-600 outline-none text-lg" placeholder="State" value={st.name} onChange={(e) => { const ns = [...config.states]; ns[sIdx].name = e.target.value; setConfig({...config, states: ns}); }} /><button onClick={() => setConfig({...config, wards: [...config.wards, { id: Date.now().toString(), stateId: st.id, name: '' }]})} className="text-[10px] bg-white border border-slate-200 px-3 py-1.5 rounded-lg font-bold">+ Ward</button><button onClick={() => setConfig({...config, states: config.states.filter(s => s.id !== st.id)})} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button></div><div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-2">{config.wards?.filter(w => w.stateId === st.id).map((wd) => (<div key={wd.id} className="flex items-center gap-2 bg-white border border-slate-100 p-2 rounded-xl"><input className="flex-1 text-sm font-bold outline-none" placeholder="Ward" value={wd.name} onChange={(e) => { const nw = [...config.wards]; const idx = config.wards.findIndex(w => w.id === wd.id); nw[idx].name = e.target.value; setConfig({...config, wards: nw}); }} /><button onClick={() => setConfig({...config, wards: config.wards.filter(w => w.id !== wd.id)})} className="text-red-400">&times;</button></div>))}</div></div>))}</div>
             </section>
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
               <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Database className="text-blue-500" /> Operational Units</h3><button onClick={() => setConfig({...config, blocks: [...config.blocks, { id: Date.now().toString(), name: '', wardId: '', supervisorId: '', totalHH: 0 }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Block</button></div>
-              <div className="space-y-4">{config.blocks.map((bl, bIdx) => (<div key={bl.id} className="bg-slate-50 p-5 rounded-[24px] border border-slate-100 space-y-4 transition hover:bg-slate-100/50"><div className="flex items-center gap-4"><input className="flex-1 bg-transparent font-black text-slate-800 outline-none text-lg border-b-2 border-slate-200 focus:border-blue-500 transition" placeholder="Block Name" value={bl.name} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].name = e.target.value; setConfig({...config, blocks: nb}); }} /><button onClick={() => setConfig({...config, blocks: config.blocks.filter(b => b.id !== bl.id)})} className="text-red-400"><Trash2 size={16}/></button></div><div className="grid grid-cols-2 md:grid-cols-3 gap-4"><select className="bg-white border border-slate-200 rounded-lg p-2 text-xs font-bold outline-none" value={bl.wardId} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].wardId = e.target.value; setConfig({...config, blocks: nb}); }}><option value="">Ward</option>{config.wards.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select><select className="bg-white border border-slate-200 rounded-lg p-2 text-xs font-bold outline-none" value={bl.supervisorId} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].supervisorId = e.target.value; setConfig({...config, blocks: nb}); }}><option value="">Lead</option>{config.supervisors.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select><div className="flex items-center gap-2"><label className="text-[10px] font-black text-slate-400 uppercase">Total HH</label><input type="number" className="w-full bg-white border border-slate-200 rounded-lg p-2 font-black text-xs" value={bl.totalHH} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].totalHH = Number(e.target.value); setConfig({...config, blocks: nb}); }} /></div></div></div>))}</div>
+              <div className="space-y-4">{config.blocks?.map((bl, bIdx) => (<div key={bl.id} className="bg-slate-50 p-5 rounded-[24px] border border-slate-100 space-y-4 transition hover:bg-slate-100/50"><div className="flex items-center gap-4"><input className="flex-1 bg-transparent font-black text-slate-800 outline-none text-lg border-b-2 border-slate-200 focus:border-blue-500 transition" placeholder="Block Name" value={bl.name} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].name = e.target.value; setConfig({...config, blocks: nb}); }} /><button onClick={() => setConfig({...config, blocks: config.blocks.filter(b => b.id !== bl.id)})} className="text-red-400"><Trash2 size={16}/></button></div><div className="grid grid-cols-2 md:grid-cols-3 gap-4"><select className="bg-white border border-slate-200 rounded-lg p-2 text-xs font-bold outline-none" value={bl.wardId} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].wardId = e.target.value; setConfig({...config, blocks: nb}); }}><option value="">Ward</option>{config.wards?.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select><select className="bg-white border border-slate-200 rounded-lg p-2 text-xs font-bold outline-none" value={bl.supervisorId} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].supervisorId = e.target.value; setConfig({...config, blocks: nb}); }}><option value="">Lead</option>{config.supervisors?.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select><div className="flex items-center gap-2"><label className="text-[10px] font-black text-slate-400 uppercase">Total HH</label><input type="number" className="w-full bg-white border border-slate-200 rounded-lg p-2 font-black text-xs" value={bl.totalHH} onChange={(e) => { const nb = [...config.blocks]; nb[bIdx].totalHH = Number(e.target.value); setConfig({...config, blocks: nb}); }} /></div></div></div>))}</div>
             </section>
             <button onClick={() => saveConfig(config)} className="w-full py-6 bg-gradient-to-r from-green-600 to-green-700 text-white rounded-[32px] font-black text-xl shadow-2xl transition hover:scale-[1.01] active:scale-[0.99]">Publish Operational Logic</button>
           </div>
@@ -721,7 +691,7 @@ const App = () => {
   );
 };
 
-// AUTO-RENDER FOR DEPLOYMENT
+// Start app for Vercel deployment (ReactDOM logic ONLY if element exists)
 const rootElement = document.getElementById('root');
 if (rootElement) {
   const root = ReactDOM.createRoot(rootElement);
