@@ -4,6 +4,8 @@ import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
   signInWithPopup, 
+  signInWithRedirect,
+  getRedirectResult,
   GoogleAuthProvider, 
   onAuthStateChanged,
   signOut 
@@ -68,14 +70,18 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 const googleProvider = new GoogleAuthProvider();
+// Force account selection to avoid automatic "blink" bypass
+googleProvider.setCustomParameters({ prompt: 'select_account' });
+
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'swm-national-v1'; 
 
 const formatDate = (date) => date.toISOString().split('T')[0];
 
 const App = () => {
   const [user, setUser] = useState(null);
-  const [userRole, setUserRole] = useState(null); // 'manager', 'coordinator', 'supervisor'
+  const [userRole, setUserRole] = useState(null); 
   const [authLoading, setAuthLoading] = useState(false);
+  const [roleLoading, setRoleLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [config, setConfig] = useState({ 
     states: [], wards: [], blocks: [], supervisors: [] 
@@ -114,19 +120,29 @@ const App = () => {
     reason: "Vehicle didn't come"
   });
 
-  // --- Auth Logic: Restricted Google Sign-In ---
+  // --- Auth Logic: Restricted Google Sign-In with Redirect Fallback ---
   const handleGoogleLogin = async () => {
     setAuthLoading(true);
     try {
+      // First attempt popup
       const result = await signInWithPopup(auth, googleProvider);
       const email = result.user.email.toLowerCase();
       if (!email.endsWith('@saahas.org')) {
         await signOut(auth);
-        showStatus('error', 'Access Restricted: Please use a @saahas.org email.');
+        showStatus('error', 'Only @saahas.org emails allowed.');
       }
     } catch (error) {
-      console.error(error);
-      showStatus('error', 'Login failed. Please verify your connection.');
+      console.error("Auth Popup Error:", error);
+      // If popup is blocked or fails, use redirect
+      if (error.code === 'auth/popup-blocked' || error.code === 'auth/cancelled-popup-request') {
+        try {
+          await signInWithRedirect(auth, googleProvider);
+        } catch (redirectErr) {
+          showStatus('error', 'Login failed. Please allow popups or try a different browser.');
+        }
+      } else {
+        showStatus('error', 'Authentication failed. Please check your connection.');
+      }
     } finally {
       setAuthLoading(false);
     }
@@ -136,12 +152,27 @@ const App = () => {
     signOut(auth);
     setUserRole(null);
     setUser(null);
+    setRoleLoading(false);
   };
+
+  // Check for redirect result on mount
+  useEffect(() => {
+    getRedirectResult(auth).then((result) => {
+      if (result?.user) {
+        const email = result.user.email.toLowerCase();
+        if (!email.endsWith('@saahas.org')) {
+          signOut(auth);
+          showStatus('error', 'Access Restricted to @saahas.org');
+        }
+      }
+    });
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
       if (u) {
         setUser(u);
+        setRoleLoading(true);
         try {
           const roleRef = doc(db, 'artifacts', appId, 'public', 'data', 'user_roles', u.email.toLowerCase());
           const roleSnap = await getDoc(roleRef);
@@ -153,11 +184,15 @@ const App = () => {
             setUserRole('unauthorized');
           }
         } catch (err) {
+          console.error("Role Fetch Error:", err);
           setUserRole('unauthorized');
+        } finally {
+          setRoleLoading(false);
         }
       } else {
         setUser(null);
         setUserRole(null);
+        setRoleLoading(false);
       }
       setLoading(false);
     });
@@ -190,7 +225,7 @@ const App = () => {
     return () => { unsubConfig(); unsubData(); };
   }, [user, userRole]);
 
-  // --- Helpers ---
+  // --- UI Helpers ---
   const showStatus = (type, text) => {
     setStatusMsg({ type, text: String(text) });
     setTimeout(() => setStatusMsg({ type: '', text: '' }), 5000);
@@ -314,7 +349,7 @@ const App = () => {
       l.noCollection ? "Absent" : "Collected", l.noCollection ? `"${l.reason}"` : ""
     ]);
 
-    // Period Formatting
+    // Summary Periods
     const calculateStats = (data) => {
       const cov = data.reduce((s,l) => s + Number(l.hhCovered || 0), 0);
       const giv = data.reduce((s,l) => s + (l.noCollection ? 0 : Number(l.hhGiving || 0)), 0);
@@ -358,16 +393,16 @@ const App = () => {
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `SWM_Report_${exportStart}_to_${exportEnd}.csv`;
+    link.download = `Saahas_SWM_Report_${exportStart}_to_${exportEnd}.csv`;
     link.click();
-    showStatus('success', 'Report Downloaded.');
+    showStatus('success', 'CSV Report Exported.');
   };
 
-  // --- Views ---
-  if (loading || (user && userRole === null)) return (
+  // --- Master View Switcher ---
+  if (loading) return (
     <div className="flex flex-col items-center justify-center h-screen bg-slate-50 gap-4">
       <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
-      <p className="text-slate-500 font-medium">Authenticating Secure Access...</p>
+      <p className="text-slate-500 font-medium">Authenticating System...</p>
     </div>
   );
 
@@ -377,17 +412,27 @@ const App = () => {
         <div className="bg-blue-50 w-20 h-20 rounded-3xl flex items-center justify-center mx-auto text-blue-600"><Globe size={40} /></div>
         <div className="text-center">
           <h1 className="text-3xl font-black text-slate-800">Saahas SWM</h1>
-          <p className="text-slate-500 mt-2 font-medium">Restricted to @saahas.org emails</p>
+          <p className="text-slate-500 mt-2 font-medium">Secure Organization Portal</p>
         </div>
-        <button 
-          onClick={handleGoogleLogin} 
-          disabled={authLoading}
-          className="w-full bg-blue-600 text-white py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-blue-700 transition shadow-xl disabled:opacity-50"
-        >
-          {authLoading ? <Loader2 className="animate-spin" size={20} /> : <LogIn size={20} />}
-          Sign in with Saahas Email
-        </button>
+        <div className="space-y-4">
+          <button 
+            onClick={handleGoogleLogin} 
+            disabled={authLoading}
+            className="w-full bg-blue-600 text-white py-4 rounded-2xl font-black flex items-center justify-center gap-3 hover:bg-blue-700 transition shadow-xl disabled:opacity-50"
+          >
+            {authLoading ? <Loader2 className="animate-spin" size={20} /> : <LogIn size={20} />}
+            Sign in with Saahas Email
+          </button>
+          <p className="text-[10px] text-center text-slate-400 font-bold uppercase tracking-widest">Restricted to @saahas.org</p>
+        </div>
       </div>
+    </div>
+  );
+
+  if (roleLoading) return (
+    <div className="flex flex-col items-center justify-center h-screen bg-slate-50 gap-4">
+      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+      <p className="text-slate-500 font-medium">Verified. Fetching User Permissions...</p>
     </div>
   );
 
@@ -395,14 +440,14 @@ const App = () => {
     <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
       <div className="max-w-md w-full bg-white p-10 rounded-[40px] shadow-2xl text-center space-y-6">
         <AlertCircle size={64} className="text-red-500 mx-auto" />
-        <h1 className="text-2xl font-black text-slate-800">Account Restricted</h1>
-        <p className="text-slate-500 font-medium">Email <b>{user.email}</b> is authenticated but not authorized. Please contact your Manager.</p>
-        <button onClick={handleLogout} className="text-blue-600 font-bold hover:underline">Sign out</button>
+        <h1 className="text-2xl font-black text-slate-800">Permission Denied</h1>
+        <p className="text-slate-500 font-medium">Your email <b>{user.email}</b> is not authorized in this system. Please contact your Manager to be whitelisted.</p>
+        <button onClick={handleLogout} className="text-blue-600 font-bold hover:underline">Switch Account</button>
       </div>
     </div>
   );
 
-  const summary = {
+  const stats = {
     covered: filteredLogs.reduce((s, v) => s + Number(v.hhCovered || 0), 0),
     giving: filteredLogs.reduce((s, v) => s + (v.noCollection ? 0 : Number(v.hhGiving || 0)), 0),
     seg: filteredLogs.reduce((s, v) => s + (v.noCollection ? 0 : Number(v.hhSegregating || 0)), 0),
@@ -411,6 +456,15 @@ const App = () => {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans pb-20 md:pb-0 flex flex-col md:flex-row">
+      {statusMsg.text && (
+        <div className={`fixed top-4 right-4 z-[100] p-4 rounded-xl shadow-2xl flex items-center gap-3 animate-in slide-in-from-top-4 ${
+          statusMsg.type === 'success' ? 'bg-green-600 text-white' : 'bg-red-600 text-white'
+        }`}>
+          {statusMsg.type === 'success' ? <CheckCircle2 size={20} /> : <AlertCircle size={20} />}
+          <span className="font-semibold">{statusMsg.text}</span>
+        </div>
+      )}
+
       {/* Sidebar Nav */}
       <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 flex justify-around p-2 z-50 md:sticky md:top-0 md:flex-col md:w-64 md:h-screen md:justify-start md:gap-2 md:p-6 shadow-sm">
         <div className="hidden md:flex p-2 font-black text-2xl text-blue-600 mb-8 items-center gap-3"><Globe size={32} /> <span>Saahas SWM</span></div>
@@ -442,18 +496,18 @@ const App = () => {
       </nav>
 
       <main className="flex-1 pt-6 px-4 md:pt-10 md:px-10 max-w-7xl overflow-x-hidden">
-        {/* DASHBOARD */}
+        {/* ANALYTICS TAB */}
         {activeTab === 'dashboard' && (
           <div className="space-y-6 animate-in fade-in duration-500">
             <header className="flex flex-col xl:flex-row xl:items-center justify-between gap-6">
-              <div><h1 className="text-3xl font-bold tracking-tight text-slate-800">Operational Dashboard</h1><p className="text-slate-500 font-medium">Executive control panel</p></div>
+              <div><h1 className="text-3xl font-bold tracking-tight text-slate-800">Operational Dashboard</h1><p className="text-slate-500 font-medium">India SWM performance overview</p></div>
               <div className="bg-white p-4 rounded-[28px] border border-slate-200 shadow-sm flex flex-col sm:flex-row items-center gap-4">
                 <div className="flex items-center gap-2">
                   <input type="date" className="bg-slate-50 border-none rounded-lg p-1.5 text-[11px] font-bold outline-none" value={exportStart} onChange={e => setExportStart(e.target.value)} />
                   <ArrowRight size={14} className="text-slate-300" />
                   <input type="date" className="bg-slate-50 border-none rounded-lg p-1.5 text-[11px] font-bold outline-none" value={exportEnd} onChange={e => setExportEnd(e.target.value)} />
                 </div>
-                <button onClick={handleExportCSV} className="w-full sm:w-auto flex items-center justify-center gap-2 bg-blue-600 text-white px-5 py-3 rounded-xl text-sm font-black shadow-lg hover:bg-blue-700 transition">
+                <button onClick={handleExportCSV} className="w-full sm:w-auto flex items-center justify-center gap-2 bg-blue-600 text-white px-5 py-3 rounded-xl text-sm font-black shadow-lg hover:bg-blue-700 transition active:scale-95">
                   <FileSpreadsheet size={18}/> Report Export
                 </button>
               </div>
@@ -479,7 +533,7 @@ const App = () => {
                   </div>
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">View</label>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase ml-1">View Period</label>
                   <div className="flex bg-slate-50 border border-slate-200 rounded-xl p-1 gap-1">
                     {['daily', 'weekly', 'monthly'].map(t => (<button key={t} onClick={() => setViewTimeframe(t)} className={`flex-1 py-1.5 rounded-lg text-[10px] font-black capitalize transition ${viewTimeframe === t ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-400'}`}>{t}</button>))}
                   </div>
@@ -494,19 +548,19 @@ const App = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-blue-50 text-blue-600 p-4 rounded-2xl"><Users size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">HH Area</p><p className="text-2xl font-black text-slate-800 leading-tight">{summary.covered.toLocaleString()}</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">HH Area</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.covered.toLocaleString()}</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-indigo-50 text-indigo-600 p-4 rounded-2xl"><Truck size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none"> partecipazione</p><p className="text-2xl font-black text-slate-800 leading-tight">{(summary.covered > 0 ? (summary.giving/summary.covered*100).toFixed(1) : 0)}%</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Participation</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.covered > 0 ? (stats.giving/stats.covered*100).toFixed(1) : 0)}%</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-green-50 text-green-600 p-4 rounded-2xl"><CheckCircle2 size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Efficiency</p><p className="text-2xl font-black text-slate-800 leading-tight">{(summary.giving > 0 ? ((summary.seg / summary.giving) * 100).toFixed(1) : 0)}%</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Efficiency</p><p className="text-2xl font-black text-slate-800 leading-tight">{(stats.giving > 0 ? ((stats.seg / stats.giving) * 100).toFixed(1) : 0)}%</p></div>
               </div>
               <div className="bg-white p-7 rounded-[32px] shadow-sm border border-slate-100 flex items-center gap-5 transition hover:shadow-md">
                 <div className="bg-red-50 text-red-600 p-4 rounded-2xl"><Ban size={28}/></div>
-                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Absences</p><p className="text-2xl font-black text-slate-800 leading-tight">{summary.absences}</p></div>
+                <div><p className="text-slate-400 text-[10px] font-black uppercase tracking-widest leading-none">Absences</p><p className="text-2xl font-black text-slate-800 leading-tight">{stats.absences}</p></div>
               </div>
             </div>
 
@@ -525,14 +579,14 @@ const App = () => {
                       <YAxis axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#94a3b8'}} />
                       <Tooltip contentStyle={{ borderRadius: '20px', border: 'none', boxShadow: '0 20px 25px -5px rgb(0 0 0 / 0.1)' }} labelStyle={{ fontSize: '14px', fontWeight: '900', color: '#1e293b' }} />
                       <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px' }} />
-                      <Area type="monotone" dataKey="giving" name="Giving Waste" stroke="#3b82f6" strokeWidth={4} fillOpacity={1} fill="url(#colorGiving)" />
+                      <Area type="monotone" dataKey="giving" name="Collection" stroke="#3b82f6" strokeWidth={4} fillOpacity={1} fill="url(#colorGiving)" />
                       <Area type="monotone" dataKey="seg" name="Segregation" stroke="#a855f7" strokeWidth={4} fillOpacity={1} fill="url(#colorSeg)" />
                     </AreaChart>
                   </ResponsiveContainer>
                 </div>
               </div>
               <div className="bg-white p-8 rounded-[40px] shadow-sm border border-slate-100">
-                <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8"><Ban className="text-red-500" size={20}/> Failure Gaps</h3>
+                <h3 className="font-bold text-lg text-slate-700 flex items-center gap-3 mb-8"><Ban className="text-red-500" size={20}/> Service Gaps</h3>
                 {gapData.length > 0 ? (
                   <div className="h-80"><ResponsiveContainer width="100%" height="100%"><BarChart data={gapData} layout="vertical"><CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f1f5f9" /><XAxis type="number" hide /><YAxis dataKey="name" type="category" axisLine={false} tickLine={false} tick={{fontSize: 10, fill: '#64748b', fontWeight: 'bold'}} width={120} /><Tooltip cursor={{fill: '#f8fafc'}} contentStyle={{ borderRadius: '15px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} /><Bar dataKey="value" name="Incidents" radius={[0, 10, 10, 0]}>{gapData.map((_, index) => <Cell key={index} fill={['#ef4444', '#f97316', '#f59e0b', '#84cc16'][index % 4]} />)}</Bar></BarChart></ResponsiveContainer></div>
                 ) : (
@@ -606,7 +660,7 @@ const App = () => {
               </div>
               <div className="flex items-center gap-3 p-5 bg-red-50 rounded-3xl border border-red-100">
                 <input type="checkbox" id="noCollection" className="w-6 h-6 rounded-lg text-red-600 border-red-200" checked={formData.noCollection} onChange={(e) => setFormData({...formData, noCollection: e.target.checked})} />
-                <label htmlFor="noCollection" className="text-red-700 font-bold text-sm">Gaps: No Collection Data Today</label>
+                <label htmlFor="noCollection" className="text-red-700 font-bold text-sm">Gaps: No Collection Today</label>
               </div>
               {formData.noCollection ? (
                 <div className="space-y-1 animate-in slide-in-from-top-2"><label className="text-[10px] font-black text-slate-400 uppercase ml-1">Reason for Gap</label><select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-white font-bold outline-none" value={formData.reason} onChange={(e) => setFormData({...formData, reason: e.target.value})}><option value="Vehicle didn't come">1) Vehicle didn't come</option><option value="Vehicle breakdown">2) Vehicle breakdown</option><option value="Collection staff not available">3) Collection staff not available</option><option value="Field supervisor absent">4) Field supervisor absent</option></select></div>
@@ -622,16 +676,16 @@ const App = () => {
           </div>
         )}
 
-        {/* SETUP */}
         {activeTab === 'setup' && (
           <div className="max-w-4xl mx-auto py-6 space-y-8 animate-in slide-in-from-bottom-6">
             <header className="space-y-2"><h1 className="text-3xl font-black text-slate-800">Operational Hierarchy</h1></header>
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><ShieldCheck className="text-blue-500"/> Team Permissions Mapping</h3></div>
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><ShieldCheck className="text-blue-500"/> Account Access Mapping</h3></div>
               <div className="grid grid-cols-1 gap-4"><div className="flex flex-col sm:flex-row gap-2"><input id="new-user-email" placeholder="staff@saahas.org" className="flex-1 bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none" /><select id="new-user-role" className="bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none"><option value="supervisor">Supervisor</option><option value="coordinator">Coordinator</option><option value="manager">Manager</option></select><button onClick={() => { const em = document.getElementById('new-user-email').value; const rl = document.getElementById('new-user-role').value; if(em) updateUserRole(em, rl); }} className="bg-blue-600 text-white px-6 py-3 rounded-xl font-black">Authorize</button></div></div>
             </section>
+            {/* Standard List Sections */}
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Users className="text-blue-500"/> Team List</h3><button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Staff</button></div>
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Users className="text-blue-500"/> Supervisor List</h3><button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Staff</button></div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{config.supervisors?.map((fs, idx) => (<div key={fs.id} className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100"><input placeholder="Name" className="flex-1 bg-transparent border-none outline-none font-bold text-slate-700" value={fs.name} onChange={(e) => { const ns = [...config.supervisors]; ns[idx].name = e.target.value; setConfig({...config, supervisors: ns}); }} /><button onClick={() => removeSupervisor(fs.id)} className="text-red-400 hover:text-red-600 transition"><Trash2 size={18}/></button></div>))}</div>
             </section>
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
