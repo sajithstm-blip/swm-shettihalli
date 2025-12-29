@@ -66,6 +66,7 @@ const firebaseConfig = isCanvas
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
+const googleProvider = new GoogleAuthProvider();
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'swm-national-v1'; 
 
 const formatDate = (date) => date.toISOString().split('T')[0];
@@ -272,7 +273,7 @@ const App = () => {
     }
   };
 
-  // --- Analytics Logic (Fixed Tooltips) ---
+  // --- Analytics & Formatting ---
   const filteredLogs = useMemo(() => {
     return dailyData.filter(log => {
       const wardMatch = dashWard === 'all' || log.wardId === dashWard;
@@ -415,10 +416,10 @@ const App = () => {
     link.href = URL.createObjectURL(blob);
     link.download = `SWM_Detailed_Report_${exportStart}_to_${exportEnd}.csv`;
     link.click();
-    showStatus('success', 'Full management report generated.');
+    showStatus('success', 'Report Downloaded.');
   };
 
-  // --- Render Views ---
+  // --- Views ---
   if (loading) return (
     <div className="flex flex-col items-center justify-center h-screen bg-slate-50 gap-4">
       <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
@@ -626,20 +627,25 @@ const App = () => {
               <div className="overflow-x-auto">
                 <table className="w-full text-left">
                   <thead className="bg-slate-50 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                    <tr><th className="px-8 py-5">Date</th><th className="px-6 py-5">Unit Mapping</th><th className="px-6 py-5">Status</th><th className="px-6 py-5 text-center">Covered</th><th className="px-6 py-5 text-center">Intake</th><th className="px-6 py-5 text-center">Seg.</th><th className="px-6 py-5">Efficiency</th></tr>
+                    <tr><th className="px-8 py-5">Date</th><th className="px-6 py-5">Block</th><th className="px-6 py-5">Status</th><th className="px-6 py-5 text-center">Covered</th><th className="px-6 py-5 text-center">Waste Given</th><th className="px-6 py-5 text-center">Waste Segregated</th><th className="px-6 py-5">Given Percentage</th><th className="px-6 py-5">Segregated Percentage</th></tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
-                    {reviewTableData.map((l, i) => (
-                      <tr key={i} className="hover:bg-blue-50/20 transition">
-                        <td className="px-8 py-5 font-bold text-slate-600 text-xs">{l.date}</td>
-                        <td className="px-6 py-5"><div className="font-black text-slate-700">{l.blockName}</div><div className="text-[10px] text-slate-400 font-bold">{l.supervisorName}</div></td>
-                        <td className="px-6 py-5">{l.noCollection ? <span className="px-2 py-1 bg-red-100 text-red-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Absent</span> : <span className="px-2 py-1 bg-green-100 text-green-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Collected</span>}</td>
-                        <td className="px-6 py-5 font-black text-slate-700 text-center">{l.hhCovered}</td>
-                        <td className="px-6 py-5 font-black text-blue-600 text-center">{l.noCollection ? 0 : l.hhGiving}</td>
-                        <td className="px-6 py-5 font-black text-purple-600 text-center">{l.noCollection ? 0 : l.hhSegregating}</td>
-                        <td className="px-6 py-5 font-black text-slate-700">{l.noCollection ? '-' : `${l.hhGiving > 0 ? (l.hhSegregating/l.hhGiving*100).toFixed(1) : 0}%`}</td>
-                      </tr>
-                    ))}
+                    {reviewTableData.map((l, i) => {
+                      const givPct = l.hhCovered > 0 ? (l.hhGiving/l.hhCovered*100).toFixed(1) : 0;
+                      const segPct = l.hhGiving > 0 ? (l.hhSegregating/l.hhGiving*100).toFixed(1) : 0;
+                      return (
+                        <tr key={i} className="hover:bg-blue-50/20 transition">
+                          <td className="px-8 py-5 font-bold text-slate-600 text-xs">{l.date}</td>
+                          <td className="px-6 py-5"><div className="font-black text-slate-700">{l.blockName}</div><div className="text-[10px] text-slate-400 font-bold">{l.supervisorName}</div></td>
+                          <td className="px-6 py-5">{l.noCollection ? <span className="px-2 py-1 bg-red-100 text-red-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Gap</span> : <span className="px-2 py-1 bg-green-100 text-green-600 rounded-lg text-[9px] font-black uppercase tracking-widest">Active</span>}</td>
+                          <td className="px-6 py-5 font-black text-slate-700 text-center">{l.hhCovered}</td>
+                          <td className="px-6 py-5 font-black text-blue-600 text-center">{l.noCollection ? 0 : l.hhGiving}</td>
+                          <td className="px-6 py-5 font-black text-purple-600 text-center">{l.noCollection ? 0 : l.hhSegregating}</td>
+                          <td className="px-6 py-5 font-black text-slate-700">{l.noCollection ? '-' : `${givPct}%`}</td>
+                          <td className="px-6 py-5 font-black text-slate-700">{l.noCollection ? '-' : `${segPct}%`}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -672,7 +678,7 @@ const App = () => {
               </div>
               <div className="flex items-center gap-3 p-5 bg-red-50 rounded-3xl border border-red-100">
                 <input type="checkbox" id="noCollection" className="w-6 h-6 rounded-lg text-red-600 border-red-200" checked={formData.noCollection} onChange={(e) => setFormData({...formData, noCollection: e.target.checked})} />
-                <label htmlFor="noCollection" className="text-red-700 font-bold text-sm">Gaps: No Collection Data Today</label>
+                <label htmlFor="noCollection" className="text-red-700 font-bold text-sm">Gaps: No Collection Today</label>
               </div>
               {formData.noCollection ? (
                 <div className="space-y-1 animate-in slide-in-from-top-2"><label className="text-[10px] font-black text-slate-400 uppercase ml-1">Reason for Gap</label><select className="w-full p-4 rounded-2xl border-2 border-slate-100 bg-white font-bold outline-none" value={formData.reason} onChange={(e) => setFormData({...formData, reason: e.target.value})}><option value="Vehicle didn't come">1) Vehicle didn't come</option><option value="Vehicle breakdown">2) Vehicle breakdown</option><option value="Collection staff not available">3) Collection staff not available</option><option value="Field supervisor absent">4) Field supervisor absent</option></select></div>
@@ -695,14 +701,12 @@ const App = () => {
               <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><ShieldCheck className="text-blue-500"/> Account Access Mapping</h3></div>
               <div className="grid grid-cols-1 gap-4"><div className="flex flex-col sm:flex-row gap-2"><input id="new-user-email" placeholder="staff@saahas.org" className="flex-1 bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none" /><select id="new-user-role" className="bg-slate-50 border border-slate-200 rounded-xl p-3 font-bold outline-none"><option value="supervisor">Supervisor</option><option value="coordinator">Coordinator</option><option value="manager">Manager</option></select><button onClick={() => { const em = document.getElementById('new-user-email').value; const rl = document.getElementById('new-user-role').value; if(em) updateUserRole(em, rl); }} className="bg-blue-600 text-white px-6 py-3 rounded-xl font-black">Authorize</button></div></div>
             </section>
-            {/* Standard Config Sections */}
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
               <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Users className="text-blue-500"/> Team List</h3><button onClick={() => setConfig({...config, supervisors: [...config.supervisors, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add Staff</button></div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{config.supervisors.map((fs, idx) => (<div key={fs.id} className="flex items-center gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-100"><input placeholder="Name" className="flex-1 bg-transparent border-none outline-none font-bold text-slate-700" value={fs.name} onChange={(e) => { const ns = [...config.supervisors]; ns[idx].name = e.target.value; setConfig({...config, supervisors: ns}); }} /><button onClick={() => removeSupervisor(fs.id)} className="text-red-400 hover:text-red-600 transition"><Trash2 size={18}/></button></div>))}</div>
             </section>
-            {/* Geo and Blocks Mapping omitted for brevity - standard logic remains identical to swm_tracker.jsx context */}
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
-              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3">< Globe className="text-blue-500" /> Geography Mapping</h3><button onClick={() => setConfig({...config, states: [...config.states, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add State</button></div>
+              <div className="flex items-center justify-between mb-8"><h3 className="text-xl font-black flex items-center gap-3"><Globe className="text-blue-500" /> Geography Mapping</h3><button onClick={() => setConfig({...config, states: [...config.states, { id: Date.now().toString(), name: '' }]})} className="text-xs bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold">Add State</button></div>
               <div className="space-y-6">{config.states.map((st, sIdx) => (<div key={st.id} className="border border-slate-100 rounded-[24px] overflow-hidden"><div className="bg-slate-50 p-4 flex items-center gap-4"><input className="flex-1 bg-transparent font-black text-blue-600 outline-none text-lg" placeholder="State" value={st.name} onChange={(e) => { const ns = [...config.states]; ns[sIdx].name = e.target.value; setConfig({...config, states: ns}); }} /><button onClick={() => setConfig({...config, wards: [...config.wards, { id: Date.now().toString(), stateId: st.id, name: '' }]})} className="text-[10px] bg-white border border-slate-200 px-3 py-1.5 rounded-lg font-bold">+ Ward</button><button onClick={() => setConfig({...config, states: config.states.filter(s => s.id !== st.id)})} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button></div><div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-2">{config.wards.filter(w => w.stateId === st.id).map((wd) => (<div key={wd.id} className="flex items-center gap-2 bg-white border border-slate-100 p-2 rounded-xl"><input className="flex-1 text-sm font-bold outline-none" placeholder="Ward" value={wd.name} onChange={(e) => { const nw = [...config.wards]; const idx = config.wards.findIndex(w => w.id === wd.id); nw[idx].name = e.target.value; setConfig({...config, wards: nw}); }} /><button onClick={() => setConfig({...config, wards: config.wards.filter(w => w.id !== wd.id)})} className="text-red-400">&times;</button></div>))}</div></div>))}</div>
             </section>
             <section className="bg-white p-8 rounded-[32px] shadow-sm border border-slate-200">
